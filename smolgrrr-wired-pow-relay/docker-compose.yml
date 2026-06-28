@@ -9,7 +9,6 @@ services:
 
   web:
     image: ghcr.io/smolgrrr/wired-pow-relay-app-web:0.2.0
-    user: "1000:1000"
     restart: on-failure
     stop_grace_period: 30s
     environment:
