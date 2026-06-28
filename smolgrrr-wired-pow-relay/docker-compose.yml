@@ -9,7 +9,6 @@ services:
 
   web:
     image: ghcr.io/smolgrrr/wired-pow-relay-app-web:0.1.0
-    build: ./web
     user: "1000:1000"
     restart: on-failure
     stop_grace_period: 30s
@@ -36,4 +35,4 @@ services:
     command: ["relay"]
     volumes:
       - ${APP_DATA_DIR}/data/strfry:/app/strfry-db
-      - ./strfry.conf:/etc/strfry/strfry.conf:ro
+      - ${APP_DATA_DIR}/strfry.conf:/etc/strfry/strfry.conf:ro
