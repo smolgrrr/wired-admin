@@ -24,8 +24,8 @@ console only. Hosts listed in `PUBLIC_HOSTS` cannot access the UI,
 `/api/status`, `/api/cron/refresh-feed`, or `/api/moderation/actions`. Public
 hosts only receive Nostr relay/NIP-11 traffic, `/api/feed/bootstrap`, and
 `/api/moderation/manifest`. `PUBLIC_HOSTS` supports exact hosts and suffix
-patterns such as `*.vercel.app`; Vercel preview deployments are frontend origins
-and only need the public snapshot/manifest/relay endpoints.
+patterns such as `*.vercel.app` and `*.onion`; Vercel preview deployments are
+frontend origins and only need the public snapshot/manifest/relay endpoints.
 
 ## Install
 

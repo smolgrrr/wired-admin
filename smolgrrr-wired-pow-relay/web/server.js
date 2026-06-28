@@ -50,7 +50,7 @@ const relayInfo = {
   software:
     process.env.RELAY_SOFTWARE ||
     "https://github.com/smolgrrr/wired-pow-relay-app",
-  version: process.env.RELAY_VERSION || "0.2.3",
+  version: process.env.RELAY_VERSION || "0.2.4",
   limitation: {
     auth_required: false,
     payment_required: false,

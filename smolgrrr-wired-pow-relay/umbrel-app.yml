@@ -2,7 +2,7 @@ manifestVersion: 1
 id: smolgrrr-wired-pow-relay
 category: social
 name: Wired PoW Relay
-version: "0.2.3"
+version: "0.2.4"
 tagline: A proof-of-work Nostr relay and feed console for Wired
 description: >-
   Wired PoW Relay runs a strfry Nostr relay behind a lightweight gateway that
@@ -25,4 +25,5 @@ torOnly: false
 releaseNotes: >-
   Keeps the Umbrel console and moderation management local-only while allowing
   public hostnames to serve only relay traffic, feed snapshots, and moderation
-  manifests. Adds wildcard public host matching for Vercel preview domains.
+  manifests. Adds public-host protection for Vercel preview and Tor onion
+  hostnames.
