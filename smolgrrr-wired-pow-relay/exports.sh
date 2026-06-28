@@ -1,0 +1,1 @@
+export APP_WIRED_POW_RELAY_PORT="3000"

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Wired PoW Relay</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Wired relay</p>
+          <h1>PoW monitor</h1>
+        </div>
+        <div class="status-pill" id="health">checking</div>
+      </header>
+
+      <section class="hero">
+        <div>
+          <p class="label">relay endpoint</p>
+          <p class="endpoint" id="endpoint">wss://...</p>
+        </div>
+        <div>
+          <p class="label">minimum proof</p>
+          <p class="big" id="minPow">--</p>
+        </div>
+        <div>
+          <p class="label">uptime</p>
+          <p class="big" id="uptime">--</p>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="metric">
+          <p>active clients</p>
+          <strong id="activeClients">0</strong>
+        </article>
+        <article class="metric">
+          <p>publish attempts</p>
+          <strong id="publishAttempts">0</strong>
+        </article>
+        <article class="metric">
+          <p>accepted</p>
+          <strong id="acceptedPublishes">0</strong>
+        </article>
+        <article class="metric warn">
+          <p>PoW rejected</p>
+          <strong id="powRejectedPublishes">0</strong>
+        </article>
+        <article class="metric">
+          <p>relay rejected</p>
+          <strong id="backendRejectedPublishes">0</strong>
+        </article>
+        <article class="metric">
+          <p>requests</p>
+          <strong id="reqMessages">0</strong>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Relay information</h2>
+        </div>
+        <dl class="details">
+          <div>
+            <dt>backend</dt>
+            <dd id="backendUrl">--</dd>
+          </div>
+          <div>
+            <dt>software</dt>
+            <dd id="software">--</dd>
+          </div>
+          <div>
+            <dt>NIPs</dt>
+            <dd id="nips">--</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Recent activity</h2>
+          <span id="updatedAt">--</span>
+        </div>
+        <ol class="activity" id="activity"></ol>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
