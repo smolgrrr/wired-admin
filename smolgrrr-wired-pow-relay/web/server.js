@@ -50,7 +50,7 @@ const relayInfo = {
   software:
     process.env.RELAY_SOFTWARE ||
     "https://github.com/smolgrrr/wired-pow-relay-app",
-  version: process.env.RELAY_VERSION || "0.2.1",
+  version: process.env.RELAY_VERSION || "0.2.2",
   limitation: {
     auth_required: false,
     payment_required: false,
@@ -407,6 +407,16 @@ async function createModerationAction(input) {
     moderator: input.moderator?.trim() || "local-admin",
   };
   store.actions.push(action);
+  await writeModerationStore(store);
+  return action;
+}
+
+async function deleteModerationAction(id) {
+  const store = await readModerationStore();
+  const index = store.actions.findIndex((action) => action.id === id);
+  if (index === -1) throw new Error("moderation action not found");
+
+  const [action] = store.actions.splice(index, 1);
   await writeModerationStore(store);
   return action;
 }
@@ -1087,6 +1097,25 @@ app.post("/api/moderation/actions", async (req, res) => {
   } catch (error) {
     res.status(400).json({
       error: error instanceof Error ? error.message : "invalid action",
+    });
+  }
+});
+
+app.delete("/api/moderation/actions/:id", async (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+
+  try {
+    const action = await deleteModerationAction(req.params.id);
+    void refreshSnapshot().catch(() => {
+      console.error(lastRefreshError || "moderation refresh failed");
+    });
+    res.json({ action });
+  } catch (error) {
+    res.status(404).json({
+      error: error instanceof Error ? error.message : "not found",
     });
   }
 });

@@ -174,6 +174,11 @@ h2 {
   color: #0c1109;
 }
 
+.button.danger {
+  border-color: rgba(243, 111, 99, 0.6);
+  color: var(--bad);
+}
+
 .button:disabled {
   cursor: wait;
   opacity: 0.65;
@@ -259,7 +264,8 @@ dd {
 
 .activity li {
   display: grid;
-  grid-template-columns: 148px minmax(0, 1fr);
+  grid-template-columns: 148px minmax(0, 1fr) auto;
+  align-items: start;
   gap: 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -285,6 +291,10 @@ dd {
   color: var(--text);
   font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
   font-size: 13px;
+}
+
+.delete-action {
+  min-width: 82px;
 }
 
 .moderation-form {
@@ -354,5 +364,9 @@ select {
 
   .activity li {
     grid-template-columns: 1fr;
+  }
+
+  .delete-action {
+    width: 100%;
   }
 }

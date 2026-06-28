@@ -98,14 +98,35 @@ function renderActions(actions) {
   }
 
   for (const action of actions) {
-    elements.actions.append(
-      activityItem(
-        action.createdAt,
-        `${action.kind} / ${action.reason}`,
-        `${action.value}${action.note ? ` - ${action.note}` : ""}`,
-      ),
+    const item = activityItem(
+      action.createdAt,
+      `${action.kind} / ${action.reason}`,
+      `${action.value}${action.note ? ` - ${action.note}` : ""}`,
     );
+    const button = document.createElement("button");
+    button.className = "button danger delete-action";
+    button.type = "button";
+    button.textContent = "Remove";
+    button.addEventListener("click", () => deleteAction(action.id));
+    item.append(button);
+    elements.actions.append(item);
   }
+}
+
+async function deleteAction(id) {
+  elements.formStatus.textContent = "Removing";
+  const response = await fetch(`/api/moderation/actions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    elements.formStatus.textContent = data.error || `HTTP ${response.status}`;
+    return;
+  }
+
+  elements.formStatus.textContent = "Action removed";
+  await Promise.all([refresh(), fetchActions()]);
 }
 
 async function fetchActions() {
