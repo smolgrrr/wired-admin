@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Wired PoW Relay</title>
+    <title>Wired Relay Console</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -11,7 +11,7 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">Wired relay</p>
-          <h1>PoW monitor</h1>
+          <h1>Relay console</h1>
         </div>
         <div class="status-pill" id="health">checking</div>
       </header>
@@ -26,64 +26,170 @@
           <p class="big" id="minPow">--</p>
         </div>
         <div>
-          <p class="label">uptime</p>
-          <p class="big" id="uptime">--</p>
+          <p class="label">snapshot posts</p>
+          <p class="big" id="postCount">--</p>
         </div>
       </section>
 
-      <section class="grid">
-        <article class="metric">
-          <p>active clients</p>
-          <strong id="activeClients">0</strong>
-        </article>
-        <article class="metric">
-          <p>publish attempts</p>
-          <strong id="publishAttempts">0</strong>
-        </article>
-        <article class="metric">
-          <p>accepted</p>
-          <strong id="acceptedPublishes">0</strong>
-        </article>
-        <article class="metric warn">
-          <p>PoW rejected</p>
-          <strong id="powRejectedPublishes">0</strong>
-        </article>
-        <article class="metric">
-          <p>relay rejected</p>
-          <strong id="backendRejectedPublishes">0</strong>
-        </article>
-        <article class="metric">
-          <p>requests</p>
-          <strong id="reqMessages">0</strong>
-        </article>
+      <nav class="tabs" aria-label="Console sections">
+        <button class="tab active" data-tab="relay" type="button">Relay</button>
+        <button class="tab" data-tab="snapshot" type="button">Snapshot</button>
+        <button class="tab" data-tab="moderation" type="button">Moderation</button>
+      </nav>
+
+      <section class="tab-panel active" id="tab-relay">
+        <section class="grid">
+          <article class="metric">
+            <p>active clients</p>
+            <strong id="activeClients">0</strong>
+          </article>
+          <article class="metric">
+            <p>publish attempts</p>
+            <strong id="publishAttempts">0</strong>
+          </article>
+          <article class="metric">
+            <p>accepted</p>
+            <strong id="acceptedPublishes">0</strong>
+          </article>
+          <article class="metric warn">
+            <p>PoW rejected</p>
+            <strong id="powRejectedPublishes">0</strong>
+          </article>
+          <article class="metric">
+            <p>relay rejected</p>
+            <strong id="backendRejectedPublishes">0</strong>
+          </article>
+          <article class="metric">
+            <p>requests</p>
+            <strong id="reqMessages">0</strong>
+          </article>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Relay information</h2>
+          </div>
+          <dl class="details">
+            <div>
+              <dt>backend</dt>
+              <dd id="backendUrl">--</dd>
+            </div>
+            <div>
+              <dt>software</dt>
+              <dd id="software">--</dd>
+            </div>
+            <div>
+              <dt>NIPs</dt>
+              <dd id="nips">--</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Recent activity</h2>
+            <span id="updatedAt">--</span>
+          </div>
+          <ol class="activity" id="activity"></ol>
+        </section>
       </section>
 
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Relay information</h2>
-        </div>
-        <dl class="details">
-          <div>
-            <dt>backend</dt>
-            <dd id="backendUrl">--</dd>
+      <section class="tab-panel" id="tab-snapshot">
+        <section class="grid snapshot-grid">
+          <article class="metric">
+            <p>profiles</p>
+            <strong id="profileCount">0</strong>
+          </article>
+          <article class="metric">
+            <p>refreshing</p>
+            <strong id="refreshing">--</strong>
+          </article>
+          <article class="metric">
+            <p>age window</p>
+            <strong id="ageHours">--</strong>
+          </article>
+          <article class="metric">
+            <p>interval</p>
+            <strong id="refreshSeconds">--</strong>
+          </article>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Feed snapshot</h2>
+            <button class="button" id="refreshSnapshot" type="button">Refresh now</button>
           </div>
-          <div>
-            <dt>software</dt>
-            <dd id="software">--</dd>
-          </div>
-          <div>
-            <dt>NIPs</dt>
-            <dd id="nips">--</dd>
-          </div>
-        </dl>
+          <dl class="details two">
+            <div>
+              <dt>bootstrap URL</dt>
+              <dd id="bootstrapUrl">--</dd>
+            </div>
+            <div>
+              <dt>last fetched</dt>
+              <dd id="snapshotFetchedAt">--</dd>
+            </div>
+            <div>
+              <dt>PoW relays</dt>
+              <dd id="powRelays">--</dd>
+            </div>
+            <div>
+              <dt>enrichment relays</dt>
+              <dd id="enrichmentRelays">--</dd>
+            </div>
+            <div>
+              <dt>last error</dt>
+              <dd id="lastRefreshError">--</dd>
+            </div>
+          </dl>
+        </section>
       </section>
 
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Recent activity</h2>
-          <span id="updatedAt">--</span>
-        </div>
-        <ol class="activity" id="activity"></ol>
+      <section class="tab-panel" id="tab-moderation">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Add moderation action</h2>
+            <span id="moderationSummary">--</span>
+          </div>
+          <form class="moderation-form" id="moderationForm">
+            <label>
+              <span>kind</span>
+              <select name="kind">
+                <option value="block_event">Block event</option>
+                <option value="block_thread">Block thread</option>
+                <option value="block_media_url">Block media URL</option>
+                <option value="block_domain">Block domain</option>
+                <option value="block_content_fingerprint">Block content fingerprint</option>
+              </select>
+            </label>
+            <label>
+              <span>reason</span>
+              <select name="reason">
+                <option value="manual">Manual</option>
+                <option value="spam">Spam</option>
+                <option value="abuse">Abuse</option>
+                <option value="illegal">Illegal</option>
+              </select>
+            </label>
+            <label class="wide">
+              <span>value</span>
+              <input name="value" type="text" autocomplete="off" required />
+            </label>
+            <label class="wide">
+              <span>note</span>
+              <input name="note" type="text" autocomplete="off" />
+            </label>
+            <button class="button primary" type="submit">Add action</button>
+            <p class="form-status" id="formStatus"></p>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Actions</h2>
+            <span id="manifestUpdatedAt">--</span>
+          </div>
+          <ol class="activity" id="actions"></ol>
+        </section>
       </section>
     </main>
     <script src="/app.js" type="module"></script>

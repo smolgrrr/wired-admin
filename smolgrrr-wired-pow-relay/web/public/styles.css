@@ -1,6 +1,6 @@
 :root {
   color-scheme: dark;
-  --bg: #111312;
+  --bg: #101211;
   --panel: #191c1a;
   --panel-2: #222622;
   --border: #343a34;
@@ -20,7 +20,15 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+button,
+input,
+select {
+  font: inherit;
 }
 
 .shell {
@@ -40,7 +48,8 @@ body {
 .eyebrow,
 .label,
 .metric p,
-dt {
+dt,
+label span {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
@@ -127,9 +136,64 @@ h2 {
   font-weight: 800;
 }
 
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 12px;
+  overflow-x: auto;
+}
+
+.tab,
+.button {
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.tab {
+  padding: 0 16px;
+}
+
+.tab.active {
+  border-color: rgba(168, 224, 109, 0.55);
+  color: var(--accent);
+}
+
+.button {
+  padding: 0 14px;
+}
+
+.button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0c1109;
+}
+
+.button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
 .grid {
   grid-template-columns: repeat(6, minmax(0, 1fr));
   margin-bottom: 12px;
+}
+
+.snapshot-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .metric {
@@ -140,6 +204,7 @@ h2 {
 .metric strong {
   display: block;
   margin-top: 18px;
+  overflow-wrap: anywhere;
   font-size: 34px;
   line-height: 1;
 }
@@ -161,13 +226,18 @@ h2 {
   margin-bottom: 16px;
 }
 
-.panel-head span {
+.panel-head span,
+.form-status {
   color: var(--muted);
   font-size: 13px;
 }
 
 .details {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.details.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 dd {
@@ -217,9 +287,42 @@ dd {
   font-size: 13px;
 }
 
+.moderation-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+label {
+  display: grid;
+  gap: 8px;
+}
+
+label.wide {
+  grid-column: span 2;
+}
+
+input,
+select {
+  min-height: 40px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 0 12px;
+}
+
+.form-status {
+  align-self: center;
+}
+
 @media (max-width: 900px) {
   .hero,
-  .details {
+  .details,
+  .details.two,
+  .snapshot-grid {
     grid-template-columns: 1fr;
   }
 
@@ -240,8 +343,13 @@ dd {
     flex-direction: column;
   }
 
-  .grid {
+  .grid,
+  .moderation-form {
     grid-template-columns: 1fr;
+  }
+
+  label.wide {
+    grid-column: span 1;
   }
 
   .activity li {

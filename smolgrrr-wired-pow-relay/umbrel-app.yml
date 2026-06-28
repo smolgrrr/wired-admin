@@ -2,13 +2,13 @@ manifestVersion: 1
 id: smolgrrr-wired-pow-relay
 category: social
 name: Wired PoW Relay
-version: "0.1.0"
-tagline: A proof-of-work Nostr relay for Wired
+version: "0.2.0"
+tagline: A proof-of-work Nostr relay and feed console for Wired
 description: >-
   Wired PoW Relay runs a strfry Nostr relay behind a lightweight gateway that
   enforces NIP-13 proof-of-work before events reach the relay database. It also
-  includes a local monitoring dashboard for relay health, client activity,
-  publish acceptances, and PoW rejections.
+  includes a local console for relay health, feed snapshot monitoring, and
+  moderation actions used by Wired clients.
 
 developer: smolgrrr
 website: https://www.getwired.app/
@@ -23,5 +23,5 @@ defaultPassword: ""
 deterministicPassword: false
 torOnly: false
 releaseNotes: >-
-  Initial community app release with a strfry backend, NIP-13 PoW gateway, and
-  monitoring dashboard.
+  Adds a Wired-compatible feed bootstrap endpoint, moderation manifest/actions
+  API, persistent snapshot/moderation storage, and a combined relay console.
