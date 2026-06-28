@@ -14,7 +14,7 @@ services:
     stop_grace_period: 30s
     environment:
       PORT: "3000"
-      RELAY_BACKEND_URL: "ws://relay:7777"
+      RELAY_BACKEND_URL: "ws://smolgrrr-wired-pow-relay_relay_1:7777"
       RELAY_NAME: "Wired PoW Relay"
       RELAY_DESCRIPTION: "A Wired proof-of-work Nostr relay backed by strfry."
       RELAY_CONTACT: ""
