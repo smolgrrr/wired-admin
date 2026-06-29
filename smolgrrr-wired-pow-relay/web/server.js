@@ -58,6 +58,16 @@ const relayInfo = {
   },
 };
 
+const securityHeaders = {
+  "Content-Security-Policy":
+    "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; connect-src 'self'; img-src 'self' https: data:; style-src 'self'; font-src 'self'",
+  "X-Frame-Options": "DENY",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  "Permissions-Policy":
+    "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()",
+};
+
 const stats = {
   startedAt: Date.now(),
   backendUrl,
@@ -252,6 +262,12 @@ function setCorsHeaders(res) {
     "Access-Control-Allow-Headers",
     "Authorization, Content-Type, X-Admin-Token",
   );
+}
+
+function setSecurityHeaders(res) {
+  for (const [header, value] of Object.entries(securityHeaders)) {
+    res.setHeader(header, value);
+  }
 }
 
 function isCronAuthorized(req) {
@@ -998,6 +1014,7 @@ const wss = new WebSocketServer({ noServer: true });
 app.disable("x-powered-by");
 app.use(express.json({ limit: "128kb" }));
 app.use((req, res, next) => {
+  setSecurityHeaders(res);
   setCorsHeaders(res);
 
   if (isPublicHost(req) && !isPublicHttpRouteAllowed(req)) {
