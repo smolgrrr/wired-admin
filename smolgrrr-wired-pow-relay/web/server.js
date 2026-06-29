@@ -39,7 +39,7 @@ const threadRelays = [...new Set([...powRelays, ...enrichmentRelays])];
 const publicHostPatterns = envList("PUBLIC_HOSTS", []).map(normalizeHost).filter(Boolean);
 
 const relayInfo = {
-  name: process.env.RELAY_NAME || "Wired PoW Relay",
+  name: process.env.RELAY_NAME || "Wired Admin",
   description:
     process.env.RELAY_DESCRIPTION ||
     "A Wired proof-of-work Nostr relay backed by strfry.",
@@ -49,13 +49,23 @@ const relayInfo = {
   supported_nips: [1, 9, 11, 13, 15, 20, 22, 33, 40],
   software:
     process.env.RELAY_SOFTWARE ||
-    "https://github.com/smolgrrr/wired-pow-relay-app",
+    "https://github.com/smolgrrr/wired-admin",
   version: process.env.RELAY_VERSION || "0.2.4",
   limitation: {
     auth_required: false,
     payment_required: false,
     min_pow_difficulty: minPow,
   },
+};
+
+const securityHeaders = {
+  "Content-Security-Policy":
+    "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; connect-src 'self'; img-src 'self' https: data:; style-src 'self'; font-src 'self'",
+  "X-Frame-Options": "DENY",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  "Permissions-Policy":
+    "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()",
 };
 
 const stats = {
@@ -252,6 +262,12 @@ function setCorsHeaders(res) {
     "Access-Control-Allow-Headers",
     "Authorization, Content-Type, X-Admin-Token",
   );
+}
+
+function setSecurityHeaders(res) {
+  for (const [header, value] of Object.entries(securityHeaders)) {
+    res.setHeader(header, value);
+  }
 }
 
 function isCronAuthorized(req) {
@@ -998,6 +1014,7 @@ const wss = new WebSocketServer({ noServer: true });
 app.disable("x-powered-by");
 app.use(express.json({ limit: "128kb" }));
 app.use((req, res, next) => {
+  setSecurityHeaders(res);
   setCorsHeaders(res);
 
   if (isPublicHost(req) && !isPublicHttpRouteAllowed(req)) {
@@ -1163,7 +1180,7 @@ await mkdir(dataDir, { recursive: true });
 await loadSnapshotFromDisk();
 
 server.listen(port, "0.0.0.0", () => {
-  console.log(`Wired PoW Relay gateway listening on ${port}`);
+  console.log(`Wired Admin gateway listening on ${port}`);
   console.log(`Proxying Nostr traffic to ${backendUrl}`);
   console.log(`Feed snapshot cache: ${snapshotCacheFile}`);
 });
