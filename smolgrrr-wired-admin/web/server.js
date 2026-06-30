@@ -585,6 +585,13 @@ function parseConfessSecretKey() {
   }
 }
 
+const disallowedConfessContentPattern =
+  /\b(?:(?:https?|wss?|ftp|ipfs):\/\/|(?:magnet|nostr):|www\.)[^\s<>"')\]]+|\b[a-z0-9.-]+\.(?:app|band|biz|blog|cloud|co|com|dev|fm|gg|info|io|is|land|link|lol|me|media|net|news|online|onion|org|site|social|to|tv|wine|xyz)(?:\/[^\s<>"')\]]*)?|\b[^\s<>"')\]]+\.(?:avif|gif|jpe?g|m4a|mov|mp3|mp4|ogg|png|svg|wav|webm|webp)(?:\?[^\s<>"')\]]*)?/i;
+
+function hasDisallowedConfessContent(content) {
+  return disallowedConfessContentPattern.test(String(content || ""));
+}
+
 function validateConfessAdmission(event, requiredPow) {
   const result = verifyPow(event, requiredPow);
   if (!result.ok) return result;
@@ -600,6 +607,10 @@ function validateConfessAdmission(event, requiredPow) {
   const content = String(event.content || "").trim();
   if (!content) {
     return { ok: false, reason: "empty confession", pow: result.pow };
+  }
+
+  if (hasDisallowedConfessContent(content)) {
+    return { ok: false, reason: "links and media are not allowed", pow: result.pow };
   }
 
   if (content.length > confessContentMaxLength) {
