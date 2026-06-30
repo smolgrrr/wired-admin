@@ -4,7 +4,14 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import { getEventHash, Relay } from "nostr-tools";
+import {
+  finalizeEvent,
+  getEventHash,
+  getPublicKey,
+  nip19,
+  Relay,
+  verifyEvent,
+} from "nostr-tools";
 import WebSocket, { WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -17,6 +24,8 @@ const snapshotCacheFile =
   process.env.FEED_SNAPSHOT_CACHE_FILE || path.join(dataDir, "feed-bootstrap.json");
 const moderationStoreFile =
   process.env.WIRED_MODERATION_STORE || path.join(dataDir, "moderation.json");
+const confessStoreFile =
+  process.env.CONFESS_STORE_FILE || path.join(dataDir, "confess.json");
 const refreshSeconds = Number(process.env.FEED_SNAPSHOT_REFRESH_SECONDS || 300);
 const snapshotAgeHours = Number(process.env.FEED_SNAPSHOT_AGE_HOURS || 24);
 const snapshotTimeoutMs = Number(process.env.FEED_SNAPSHOT_TIMEOUT_MS || 12_000);
@@ -36,6 +45,19 @@ const enrichmentRelays = envList("ENRICHMENT_RELAYS", [
   "wss://relay.snort.social",
 ]);
 const threadRelays = [...new Set([...powRelays, ...enrichmentRelays])];
+const confessRelays = envList("CONFESS_RELAYS", [backendUrl, ...threadRelays]);
+const confessDailyLimit = Math.max(1, Number(process.env.CONFESS_DAILY_LIMIT || 6));
+const confessBasePow = Math.max(minPow, Number(process.env.CONFESS_MIN_POW || minPow));
+const confessMaxPow = Math.max(confessBasePow, Number(process.env.CONFESS_MAX_POW || 28));
+const confessContentMaxLength = Math.max(
+  1,
+  Number(process.env.CONFESS_CONTENT_MAX_LENGTH || 2000),
+);
+const confessPublishTimeoutMs = Math.max(
+  1000,
+  Number(process.env.CONFESS_PUBLISH_TIMEOUT_MS || 8000),
+);
+const confessMentionPubkeys = envList("CONFESS_MENTION_PUBKEYS", []);
 const publicHostPatterns = envList("PUBLIC_HOSTS", []).map(normalizeHost).filter(Boolean);
 
 const relayInfo = {
@@ -91,6 +113,7 @@ const stats = {
 let snapshot = null;
 let lastRefreshError = null;
 let refreshPromise = null;
+let confessLedgerQueue = Promise.resolve();
 
 function envList(name, fallback) {
   const raw = process.env[name];
@@ -154,6 +177,14 @@ function isPublicHttpRouteAllowed(req) {
     return req.method === "GET" || req.method === "OPTIONS";
   }
 
+  if (url.pathname === "/api/confess/status") {
+    return req.method === "GET" || req.method === "OPTIONS";
+  }
+
+  if (url.pathname === "/api/confess") {
+    return req.method === "POST" || req.method === "OPTIONS";
+  }
+
   return false;
 }
 
@@ -187,7 +218,7 @@ function eventPow(event) {
   return countLeadingZeroBits(event.id);
 }
 
-function verifyPow(event) {
+function verifyPow(event, requiredPow = minPow) {
   if (!event || typeof event !== "object") {
     return { ok: false, reason: "invalid event", pow: 0 };
   }
@@ -217,16 +248,16 @@ function verifyPow(event) {
     return { ok: false, reason: "missing nonce tag", pow };
   }
 
-  if (claimedTarget < minPow) {
+  if (claimedTarget < requiredPow) {
     return {
       ok: false,
-      reason: `nonce target ${claimedTarget} is below ${minPow}`,
+      reason: `nonce target ${claimedTarget} is below ${requiredPow}`,
       pow,
     };
   }
 
-  if (pow < minPow) {
-    return { ok: false, reason: `proof ${pow} is below ${minPow}`, pow };
+  if (pow < requiredPow) {
+    return { ok: false, reason: `proof ${pow} is below ${requiredPow}`, pow };
   }
 
   return { ok: true, reason: "", pow };
@@ -444,6 +475,307 @@ async function deleteModerationAction(id) {
   const [action] = store.actions.splice(index, 1);
   await writeModerationStore(store);
   return action;
+}
+
+function utcDayKey(timeMs = Date.now()) {
+  return new Date(timeMs).toISOString().slice(0, 10);
+}
+
+function nextUtcReset(day) {
+  return new Date(Date.parse(`${day}T00:00:00.000Z`) + 24 * 60 * 60 * 1000);
+}
+
+async function readConfessStore() {
+  try {
+    const parsed = JSON.parse(await readFile(confessStoreFile, "utf8"));
+    if (parsed?.version === 1 && Array.isArray(parsed.posts)) return parsed;
+  } catch {
+    // Missing or malformed stores are treated as empty.
+  }
+  return { version: 1, posts: [] };
+}
+
+async function writeConfessStore(data) {
+  await mkdir(path.dirname(confessStoreFile), { recursive: true });
+  const temp = `${confessStoreFile}.${process.pid}.tmp`;
+  await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  await rename(temp, confessStoreFile);
+}
+
+function todaysConfessPosts(store, now = Date.now()) {
+  const day = utcDayKey(now);
+  return store.posts
+    .filter((post) => post.day === day)
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+function adjustedConfessPow(posts, now = Date.now()) {
+  if (posts.length >= confessDailyLimit) return confessMaxPow;
+  if (posts.length === 0) return confessBasePow;
+
+  const day = utcDayKey(now);
+  const dayStartSeconds = Date.parse(`${day}T00:00:00.000Z`) / 1000;
+  const nowSeconds = now / 1000;
+  const targetSpacing = (24 * 60 * 60) / confessDailyLimit;
+  const elapsed = Math.max(60, nowSeconds - dayStartSeconds);
+  const expectedPosts = Math.max(0.25, elapsed / targetSpacing);
+  const scheduleRatio = posts.length / expectedPosts;
+
+  let intervalRatio = scheduleRatio;
+  if (posts.length > 1) {
+    const first = posts[0].createdAt / 1000;
+    const last = posts[posts.length - 1].createdAt / 1000;
+    const actualSpacing = Math.max(60, (last - first) / (posts.length - 1));
+    intervalRatio = targetSpacing / actualSpacing;
+  }
+
+  const ratio = Math.max(scheduleRatio, intervalRatio);
+  const adjustment = ratio > 1 ? Math.ceil(Math.log2(ratio)) : 0;
+  const scarcityAdjustment = posts.length >= confessDailyLimit - 1 ? 1 : 0;
+  return Math.min(confessMaxPow, confessBasePow + adjustment + scarcityAdjustment);
+}
+
+function confessStatusFromStore(store, now = Date.now()) {
+  const day = utcDayKey(now);
+  const posts = todaysConfessPosts(store, now);
+  const count = posts.length;
+  const remaining = Math.max(0, confessDailyLimit - count);
+  return {
+    configured: Boolean(parseConfessSecretKey()),
+    day,
+    count,
+    limit: confessDailyLimit,
+    remaining,
+    minimumPow: adjustedConfessPow(posts, now),
+    closed: remaining === 0,
+    nextResetAt: nextUtcReset(day).toISOString(),
+  };
+}
+
+function withConfessLedgerLock(task) {
+  const run = confessLedgerQueue.then(task, task);
+  confessLedgerQueue = run.catch(() => {});
+  return run;
+}
+
+function hexToBytes(hex) {
+  if (!/^[0-9a-f]{64}$/i.test(hex)) {
+    throw new Error("expected 32-byte hex private key");
+  }
+  const bytes = new Uint8Array(32);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function parseConfessSecretKey() {
+  const raw = String(process.env.CONFESS_NOSTR_SECRET_KEY || "").trim();
+  if (!raw) return null;
+
+  try {
+    if (raw.startsWith("nsec1")) {
+      const decoded = nip19.decode(raw);
+      if (decoded.type !== "nsec" || !(decoded.data instanceof Uint8Array)) return null;
+      return decoded.data;
+    }
+    return hexToBytes(raw);
+  } catch {
+    return null;
+  }
+}
+
+const disallowedConfessContentPattern =
+  /\b(?:(?:https?|wss?|ftp|ipfs):\/\/|(?:magnet|nostr):|www\.)[^\s<>"')\]]+|\b[a-z0-9.-]+\.(?:app|band|biz|blog|cloud|co|com|dev|fm|gg|info|io|is|land|link|lol|me|media|net|news|online|onion|org|site|social|to|tv|wine|xyz)(?:\/[^\s<>"')\]]*)?|\b[^\s<>"')\]]+\.(?:avif|gif|jpe?g|m4a|mov|mp3|mp4|ogg|png|svg|wav|webm|webp)(?:\?[^\s<>"')\]]*)?/i;
+
+function hasDisallowedConfessContent(content) {
+  return disallowedConfessContentPattern.test(String(content || ""));
+}
+
+function validateConfessAdmission(event, requiredPow) {
+  const result = verifyPow(event, requiredPow);
+  if (!result.ok) return result;
+
+  if (!verifyEvent(event)) {
+    return { ok: false, reason: "invalid event signature", pow: result.pow };
+  }
+
+  if (event.kind !== 1) {
+    return { ok: false, reason: "confess proof must be kind 1", pow: result.pow };
+  }
+
+  const content = String(event.content || "").trim();
+  if (!content) {
+    return { ok: false, reason: "empty confession", pow: result.pow };
+  }
+
+  if (hasDisallowedConfessContent(content)) {
+    return { ok: false, reason: "links and media are not allowed", pow: result.pow };
+  }
+
+  if (content.length > confessContentMaxLength) {
+    return {
+      ok: false,
+      reason: `confession exceeds ${confessContentMaxLength} characters`,
+      pow: result.pow,
+    };
+  }
+
+  return { ok: true, reason: "", pow: result.pow };
+}
+
+function addUniqueTag(tags, tag) {
+  const key = `${tag[0]}:${tag[1] || ""}:${tag[2] || ""}`;
+  if (tags.some((existing) => `${existing[0]}:${existing[1] || ""}:${existing[2] || ""}` === key)) {
+    return;
+  }
+  tags.push(tag);
+}
+
+const nostrRefPattern = /\b(?:nostr:)?(?:note|nevent|npub|nprofile)1[a-z0-9]+/gi;
+
+function tagsFromNostrRefs(content) {
+  const tags = [];
+  for (const match of String(content || "").matchAll(nostrRefPattern)) {
+    const ref = match[0].startsWith("nostr:") ? match[0].slice(6) : match[0];
+    try {
+      const decoded = nip19.decode(ref);
+      if (decoded.type === "note" && typeof decoded.data === "string") {
+        addUniqueTag(tags, ["e", decoded.data]);
+      }
+      if (decoded.type === "nevent" && decoded.data?.id) {
+        const relay = decoded.data.relays?.[0];
+        addUniqueTag(tags, relay ? ["e", decoded.data.id, relay] : ["e", decoded.data.id]);
+      }
+      if (decoded.type === "npub" && typeof decoded.data === "string") {
+        addUniqueTag(tags, ["p", decoded.data]);
+      }
+      if (decoded.type === "nprofile" && decoded.data?.pubkey) {
+        addUniqueTag(tags, ["p", decoded.data.pubkey]);
+      }
+    } catch {
+      // Invalid inline Nostr refs are left as plain content.
+    }
+  }
+  return tags;
+}
+
+function buildConfessionEvent(admissionEvent, pow, secretKey) {
+  const content = admissionEvent.content.trim();
+  const tags = [
+    ["client", "wired-confess"],
+    ["proof", admissionEvent.id, String(pow)],
+  ];
+
+  confessMentionPubkeys.forEach((pubkey) => {
+    if (/^[0-9a-f]{64}$/i.test(pubkey)) addUniqueTag(tags, ["p", pubkey.toLowerCase()]);
+  });
+
+  tagsFromNostrRefs(content).forEach((tag) => addUniqueTag(tags, tag));
+
+  return finalizeEvent(
+    {
+      kind: 1,
+      content,
+      tags,
+      created_at: Math.floor(Date.now() / 1000),
+    },
+    secretKey,
+  );
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function publishConfessionEvent(event) {
+  const results = await Promise.allSettled(
+    confessRelays.map(async (url) => {
+      const relay = await withTimeout(Relay.connect(url), confessPublishTimeoutMs, url);
+      try {
+        await withTimeout(relay.publish(event), confessPublishTimeoutMs, url);
+        return normalizeRelayUrl(relay.url || url);
+      } finally {
+        try {
+          relay.close();
+        } catch {
+          // Relay already closed.
+        }
+      }
+    }),
+  );
+
+  return uniqueSorted(
+    results
+      .filter((result) => result.status === "fulfilled")
+      .map((result) => result.value),
+  );
+}
+
+async function createConfession(admissionEvent) {
+  const secretKey = parseConfessSecretKey();
+  if (!secretKey) {
+    const error = new Error("confess account is not configured");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  return withConfessLedgerLock(async () => {
+    const store = await readConfessStore();
+    const status = confessStatusFromStore(store);
+
+    if (status.closed) {
+      const error = new Error("daily confess cap reached");
+      error.statusCode = 429;
+      throw error;
+    }
+
+    if (store.posts.some((post) => post.proofId === admissionEvent?.id)) {
+      const error = new Error("confess proof has already been used");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const proof = validateConfessAdmission(admissionEvent, status.minimumPow);
+    if (!proof.ok) {
+      const error = new Error(proof.reason);
+      error.statusCode = 400;
+      error.pow = proof.pow;
+      throw error;
+    }
+
+    const event = buildConfessionEvent(admissionEvent, proof.pow, secretKey);
+    const acceptedRelays = await publishConfessionEvent(event);
+    if (acceptedRelays.length === 0) {
+      const error = new Error("no relay accepted the confession");
+      error.statusCode = 502;
+      throw error;
+    }
+
+    store.posts.push({
+      day: status.day,
+      eventId: event.id,
+      proofId: admissionEvent.id,
+      pow: proof.pow,
+      createdAt: Date.now(),
+      acceptedRelays,
+    });
+    await writeConfessStore(store);
+
+    const nextStatus = confessStatusFromStore(store);
+    return {
+      event,
+      acceptedRelays,
+      count: nextStatus.count,
+      remaining: nextStatus.remaining,
+      minimumPow: nextStatus.minimumPow,
+      nextResetAt: nextStatus.nextResetAt,
+    };
+  });
 }
 
 const httpUrlPattern = /https?:\/\/[^\s<>"')\]]+/gi;
@@ -1044,11 +1376,19 @@ app.use((req, res, next) => {
 app.get("/api/status", async (_req, res) => {
   const actions = await getModerationActions();
   const manifest = manifestFromActions(actions);
+  const confessStore = await readConfessStore();
+  const confessSecretKey = parseConfessSecretKey();
   res.json({
     ...stats,
     uptimeSeconds: Math.floor((Date.now() - stats.startedAt) / 1000),
     relayInfo,
     snapshot: snapshotStatus(),
+    confess: {
+      ...confessStatusFromStore(confessStore),
+      storeFile: confessStoreFile,
+      relays: confessRelays,
+      linkedPubkey: confessSecretKey ? getPublicKey(confessSecretKey) : null,
+    },
     moderation: {
       actionCount: actions.length,
       manifest,
@@ -1104,6 +1444,25 @@ app.get("/healthz", (_req, res) => {
     ok: Boolean(snapshot),
     ...snapshotStatus(),
   });
+});
+
+app.get("/api/confess/status", async (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json(confessStatusFromStore(await readConfessStore()));
+});
+
+app.post("/api/confess", async (req, res) => {
+  try {
+    const result = await createConfession(req.body?.event);
+    res.status(201).json({ ok: true, ...result });
+  } catch (error) {
+    const statusCode =
+      typeof error?.statusCode === "number" ? error.statusCode : 500;
+    res.status(statusCode).json({
+      error: error instanceof Error ? error.message : "confess failed",
+      pow: typeof error?.pow === "number" ? error.pow : undefined,
+    });
+  }
 });
 
 app.get("/api/moderation/manifest", async (_req, res) => {
