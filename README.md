@@ -59,9 +59,15 @@ Runtime environment:
 - `CONFESS_X_OAUTH1_ACCESS_TOKEN`: dedicated account access token.
 - `CONFESS_X_OAUTH1_ACCESS_SECRET`: dedicated account access token secret.
 - `CONFESS_X_ACCOUNT_HANDLE`: optional operator label for status output.
+- `CONFESS_X_THREAD_BASE_URL`: base URL for automatic X replies linking to
+  the Wired thread, defaults to `https://wiredsignal.online/thread`.
 
 Before posting, the backend applies conservative X safety gates: no links/media,
 no X mentions, no hashtags/cashtags, no obvious private information, and strict
 blocking for high-risk harassment, threats, self-harm encouragement, scams, and
 sexual-minor patterns. Blocked X mirrors are recorded on the Confess ledger but
 the Nostr event remains published.
+
+After the main X post succeeds, the mirror posts a reply to that X post with the
+Wired thread URL. If the reply fails after the original X post succeeds, retries
+reuse the stored original X post ID and only retry the reply.

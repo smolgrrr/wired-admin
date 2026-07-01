@@ -66,6 +66,11 @@ const confessXMaxLength = Math.max(
   1,
   Math.min(280, Number(process.env.CONFESS_X_MAX_LENGTH || 260)),
 );
+const confessXThreadBaseUrl = String(
+  process.env.CONFESS_X_THREAD_BASE_URL || "https://wiredsignal.online/thread",
+)
+  .trim()
+  .replace(/\/+$/, "");
 const confessXConfig = {
   enabled: envFlag("CONFESS_X_ENABLED", false),
   dryRun: envFlag("CONFESS_X_DRY_RUN", true),
@@ -818,6 +823,7 @@ function initialConfessXMirror(event, store) {
     enabled: confessXConfig.enabled,
     dryRun: confessXConfig.dryRun,
     accountHandle: confessXConfig.accountHandle || null,
+    threadUrl: confessXThreadUrl(event.id),
     updatedAt: now,
   };
 
@@ -881,11 +887,12 @@ function nextConfessXAttemptAt(attempts) {
   return Date.now() + Math.min(delay, 24 * 60 * 60 * 1000);
 }
 
-function failedConfessXMirror(existing, reason, retryable) {
+function failedConfessXMirror(existing, reason, retryable, patch = {}) {
   const attempts = Number(existing?.attempts || 0) + 1;
   const canRetry = Boolean(retryable && attempts < confessXMaxAttempts);
   return {
     ...existing,
+    ...patch,
     status: "failed",
     reason,
     retryable: canRetry,
@@ -895,7 +902,15 @@ function failedConfessXMirror(existing, reason, retryable) {
   };
 }
 
-async function postConfessXText(text, existingMirror) {
+function confessXThreadUrl(eventId) {
+  return `${confessXThreadBaseUrl}/${encodeURIComponent(eventId)}`;
+}
+
+function buildConfessXThreadReplyText(eventId) {
+  return `thread: ${confessXThreadUrl(eventId)}`;
+}
+
+async function postConfessXText(text, existingMirror, eventId) {
   if (confessXConfig.dryRun) {
     return {
       ...existingMirror,
@@ -904,6 +919,7 @@ async function postConfessXText(text, existingMirror) {
       retryable: false,
       attempts: Number(existingMirror?.attempts || 0) + 1,
       nextAttemptAt: null,
+      threadUrl: eventId ? confessXThreadUrl(eventId) : existingMirror?.threadUrl,
       postedAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -913,25 +929,47 @@ async function postConfessXText(text, existingMirror) {
     return failedConfessXMirror(existingMirror, "X OAuth1 credentials are not configured", false);
   }
 
-  const response = await postConfessXOAuth1Request(text);
-  const payload = await readJsonResponse(response);
-  if (response.ok && payload?.data?.id) {
+  let tweetId = existingMirror?.tweetId || null;
+  let postedAt = existingMirror?.postedAt || null;
+  if (!tweetId) {
+    const response = await postConfessXOAuth1Request(text);
+    const payload = await readJsonResponse(response);
+    if (!response.ok || !payload?.data?.id) {
+      const reason = `X post failed (${response.status}): ${summarizeXError(payload)}`;
+      const retryable = response.status === 429 || response.status >= 500;
+      return failedConfessXMirror(existingMirror, reason, retryable);
+    }
+    tweetId = payload.data.id;
+    postedAt = Date.now();
+  }
+
+  const threadReplyText = buildConfessXThreadReplyText(eventId);
+  const replyResponse = await postConfessXOAuth1Request(threadReplyText, tweetId);
+  const replyPayload = await readJsonResponse(replyResponse);
+  if (replyResponse.ok && replyPayload?.data?.id) {
     return {
       ...existingMirror,
       status: "posted",
       reason: "",
       retryable: false,
       attempts: Number(existingMirror?.attempts || 0) + 1,
-      tweetId: payload.data.id,
+      tweetId,
+      replyTweetId: replyPayload.data.id,
+      threadUrl: confessXThreadUrl(eventId),
       nextAttemptAt: null,
-      postedAt: Date.now(),
+      postedAt,
+      repliedAt: Date.now(),
       updatedAt: Date.now(),
     };
   }
 
-  const reason = `X post failed (${response.status}): ${summarizeXError(payload)}`;
-  const retryable = response.status === 429 || response.status >= 500;
-  return failedConfessXMirror(existingMirror, reason, retryable);
+  const reason = `X thread reply failed (${replyResponse.status}): ${summarizeXError(replyPayload)}`;
+  const retryable = replyResponse.status === 429 || replyResponse.status >= 500;
+  return failedConfessXMirror(existingMirror, reason, retryable, {
+    tweetId,
+    threadUrl: confessXThreadUrl(eventId),
+    postedAt,
+  });
 }
 
 function oauthPercentEncode(value) {
@@ -986,8 +1024,12 @@ function oauth1AuthorizationHeader(method, url) {
     .join(", ")}`;
 }
 
-async function postConfessXOAuth1Request(text) {
+async function postConfessXOAuth1Request(text, inReplyToTweetId = null) {
   const url = "https://api.x.com/2/tweets";
+  const body = { text };
+  if (inReplyToTweetId) {
+    body.reply = { in_reply_to_tweet_id: inReplyToTweetId };
+  }
   return withTimeout(
     fetch(url, {
       method: "POST",
@@ -995,7 +1037,7 @@ async function postConfessXOAuth1Request(text) {
         Authorization: oauth1AuthorizationHeader("POST", url),
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(body),
     }),
     confessXPostTimeoutMs,
     "X post",
@@ -1025,7 +1067,7 @@ async function processConfessXMirror(eventId, mirror) {
 
   confessXMirrorInFlight.add(eventId);
   try {
-    const nextMirror = await postConfessXText(mirror.text, mirror);
+    const nextMirror = await postConfessXText(mirror.text, mirror, eventId);
     await updateConfessXMirror(eventId, () => nextMirror);
     return nextMirror;
   } catch (error) {
@@ -1085,6 +1127,7 @@ function confessXStatusFromStore(store) {
     maxLength: confessXMaxLength,
     retrySeconds: confessXRetrySeconds,
     maxAttempts: confessXMaxAttempts,
+    threadBaseUrl: confessXThreadBaseUrl,
     counts,
   };
 }
@@ -1095,6 +1138,8 @@ function publicConfessXMirror(mirror) {
     status: mirror.status,
     reason: mirror.reason || undefined,
     tweetId: mirror.tweetId || undefined,
+    replyTweetId: mirror.replyTweetId || undefined,
+    threadUrl: mirror.threadUrl || undefined,
     retryable: mirror.retryable,
     attempts: mirror.attempts,
     nextAttemptAt: mirror.nextAttemptAt,

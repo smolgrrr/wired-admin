@@ -30,6 +30,7 @@ services:
       CONFESS_X_ACCOUNT_HANDLE: ""
       CONFESS_X_POST_PREFIX: ""
       CONFESS_X_POST_SUFFIX: ""
+      CONFESS_X_THREAD_BASE_URL: "https://wiredsignal.online/thread"
       CONFESS_X_MAX_LENGTH: "260"
       CONFESS_X_SAFETY_MODE: "strict"
       CONFESS_X_RETRY_SECONDS: "300"
