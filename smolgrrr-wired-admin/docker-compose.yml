@@ -10,7 +10,7 @@ services:
 
   web:
     container_name: smolgrrr-wired-admin_web_1
-    image: ghcr.io/smolgrrr/wired-admin-web:0.2.5
+    image: ghcr.io/smolgrrr/wired-admin-web:0.2.6
     restart: on-failure
     stop_grace_period: 30s
     environment:
@@ -32,6 +32,11 @@ services:
       CONFESS_X_ACCOUNT_HANDLE: ""
       CONFESS_X_POST_PREFIX: ""
       CONFESS_X_POST_SUFFIX: ""
+      CONFESS_X_IMAGE_POST_TEXT: "new anonymous postcard on wired"
+      CONFESS_X_IMAGE_WIDTH: "1200"
+      CONFESS_X_IMAGE_HEIGHT: "675"
+      CONFESS_X_IMAGE_TEMPLATE: "postcard-v1"
+      CONFESS_X_IMAGE_MAX_BYTES: "4500000"
       CONFESS_X_THREAD_BASE_URL: "https://wiredsignal.online/thread"
       CONFESS_X_MAX_LENGTH: "260"
       CONFESS_X_SAFETY_MODE: "strict"
@@ -50,7 +55,7 @@ services:
       RELAY_ICON: "https://raw.githubusercontent.com/smolgrrr/wired-admin/main/smolgrrr-wired-admin/icon.png"
       RELAY_MIN_POW: "16"
       RELAY_SOFTWARE: "https://github.com/smolgrrr/wired-admin"
-      RELAY_VERSION: "0.2.5"
+      RELAY_VERSION: "0.2.6"
     volumes:
       - ${APP_DATA_DIR}/data/web:/app/data
     depends_on:

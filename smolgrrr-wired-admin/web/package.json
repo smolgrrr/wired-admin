@@ -1,6 +1,6 @@
 {
   "name": "wired-admin-web",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "type": "module",
   "private": true,
   "scripts": {
@@ -10,6 +10,7 @@
   "dependencies": {
     "express": "^4.19.2",
     "nostr-tools": "^2.23.8",
+    "sharp": "^0.35.3",
     "ws": "^8.18.3"
   }
 }
