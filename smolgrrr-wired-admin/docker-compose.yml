@@ -2,12 +2,14 @@ version: "3.7"
 
 services:
   app_proxy:
+    container_name: smolgrrr-wired-admin_app_proxy_1
     environment:
       APP_HOST: smolgrrr-wired-admin_web_1
       APP_PORT: 3000
       PROXY_AUTH_ADD: "false"
 
   web:
+    container_name: smolgrrr-wired-admin_web_1
     image: ghcr.io/smolgrrr/wired-admin-web:0.2.5
     restart: on-failure
     stop_grace_period: 30s
@@ -55,6 +57,7 @@ services:
       - relay
 
   relay:
+    container_name: smolgrrr-wired-admin_relay_1
     image: ghcr.io/hoytech/strfry@sha256:c52807349888ef8a9f8720f3e51ee81af7e20114bad105915febb78f9c604cb1
     user: "1000:1000"
     restart: on-failure
