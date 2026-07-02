@@ -4,6 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import sharp from "sharp";
 import {
   finalizeEvent,
   getEventHash,
@@ -71,6 +72,26 @@ const confessXThreadBaseUrl = String(
 )
   .trim()
   .replace(/\/+$/, "");
+const confessXImageWidth = Math.max(
+  600,
+  Math.min(2400, Number(process.env.CONFESS_X_IMAGE_WIDTH || 1200)),
+);
+const confessXImageHeight = Math.max(
+  315,
+  Math.min(2400, Number(process.env.CONFESS_X_IMAGE_HEIGHT || 675)),
+);
+const confessXImageMaxBytes = Math.max(
+  100_000,
+  Math.min(5_000_000, Number(process.env.CONFESS_X_IMAGE_MAX_BYTES || 4_500_000)),
+);
+const confessXImageTemplate = String(
+  process.env.CONFESS_X_IMAGE_TEMPLATE || "postcard-v1",
+)
+  .trim()
+  .toLowerCase();
+const confessXImagePostText = String(
+  process.env.CONFESS_X_IMAGE_POST_TEXT || "new anonymous postcard on wired",
+).trim();
 const confessXConfig = {
   enabled: envFlag("CONFESS_X_ENABLED", false),
   dryRun: envFlag("CONFESS_X_DRY_RUN", true),
@@ -97,7 +118,7 @@ const relayInfo = {
   software:
     process.env.RELAY_SOFTWARE ||
     "https://github.com/smolgrrr/wired-admin",
-  version: process.env.RELAY_VERSION || "0.2.5",
+  version: process.env.RELAY_VERSION || "0.2.6",
   limitation: {
     auth_required: false,
     payment_required: false,
@@ -749,6 +770,190 @@ function buildConfessXPostText(content) {
   ]);
 }
 
+function buildConfessXTweetText() {
+  return confessXImagePostText || "new anonymous postcard on wired";
+}
+
+function escapeXml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function normalizeSvgText(value) {
+  return String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function wrapSvgText(value, maxCharacters, maxLines) {
+  const paragraphs = normalizeSvgText(value).split("\n");
+  const lines = [];
+  let truncated = false;
+
+  for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
+    const paragraph = paragraphs[paragraphIndex];
+    if (lines.length >= maxLines) {
+      truncated = true;
+      break;
+    }
+    if (!paragraph.trim()) {
+      if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+      continue;
+    }
+
+    let line = "";
+    for (const word of paragraph.trim().split(/\s+/)) {
+      const nextLine = line ? `${line} ${word}` : word;
+      if (nextLine.length <= maxCharacters) {
+        line = nextLine;
+        continue;
+      }
+
+      if (line) lines.push(line);
+      line = word;
+
+      while (line.length > maxCharacters) {
+        if (lines.length >= maxLines) {
+          truncated = true;
+          break;
+        }
+        lines.push(line.slice(0, maxCharacters));
+        line = line.slice(maxCharacters);
+      }
+
+      if (lines.length >= maxLines) {
+        truncated = true;
+        break;
+      }
+    }
+
+    if (line && lines.length < maxLines) lines.push(line);
+    if (paragraphIndex < paragraphs.length - 1 && lines.length >= maxLines) {
+      truncated = true;
+      break;
+    }
+  }
+
+  const limited = lines.slice(0, maxLines);
+  if (limited.length === 0) limited.push("");
+  if (truncated && limited.length > 0) {
+    limited[limited.length - 1] = `${limited[limited.length - 1].replace(/\s+$/, "")}...`;
+  }
+  return limited;
+}
+
+function avatarCellsForPubkey(pubkey) {
+  const digest = crypto.createHash("sha256").update(String(pubkey || "")).digest();
+  return Array.from({ length: 16 }, (_, index) => (digest[index] & 1) === 1);
+}
+
+function confessPostcardSvg({ text, eventId, pubkey }) {
+  const width = confessXImageWidth;
+  const height = confessXImageHeight;
+  const scale = width / 1200;
+  const outer = Math.round(78 * scale);
+  const cardX = Math.round(128 * scale);
+  const cardY = Math.round(104 * scale);
+  const cardWidth = width - cardX * 2;
+  const cardHeight = height - cardY * 2;
+  const headerY = cardY + Math.round(50 * scale);
+  const bodyX = cardX + Math.round(42 * scale);
+  const bodyY = cardY + Math.round(150 * scale);
+  const fontSize = Math.max(24, Math.round(36 * scale));
+  const lineHeight = Math.round(fontSize * 1.55);
+  const maxBodyWidth = cardWidth - Math.round(84 * scale);
+  const maxCharacters = Math.max(18, Math.floor(maxBodyWidth / (fontSize * 0.62)));
+  const maxLines = Math.max(3, Math.floor((cardHeight - Math.round(290 * scale)) / lineHeight));
+  const lines = wrapSvgText(text, maxCharacters, maxLines);
+  const bodyTspans = lines
+    .map((line, index) => {
+      const dy = index === 0 ? 0 : line === "" ? lineHeight * 0.72 : lineHeight;
+      return `<tspan x="${bodyX}" dy="${index === 0 ? 0 : dy}">${escapeXml(line)}</tspan>`;
+    })
+    .join("");
+  const signal = Math.max(0, countLeadingZeroBits(String(eventId || "")));
+  const shortEvent = String(eventId || "").slice(0, 12);
+  const cells = avatarCellsForPubkey(pubkey)
+    .map((filled, index) => {
+      if (!filled) return "";
+      const cell = Math.round(8 * scale);
+      const gap = Math.round(2 * scale);
+      const x = cardX + Math.round(42 * scale) + (index % 4) * (cell + gap);
+      const y = headerY - Math.round(12 * scale) + Math.floor(index / 4) * (cell + gap);
+      return `<rect x="${x}" y="${y}" width="${cell}" height="${cell}" fill="#5eead4" opacity="0.55" />`;
+    })
+    .join("");
+  const labelX = cardX + Math.round(92 * scale);
+  const labelY = headerY + Math.round(11 * scale);
+  const metaY = cardY + cardHeight - Math.round(54 * scale);
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="signal-glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="${Math.max(2, 5 * scale)}" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+    <linearGradient id="card-shade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#111118" />
+      <stop offset="100%" stop-color="#0a0a0f" />
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="#050508" />
+  <rect x="${outer}" y="${Math.round(56 * scale)}" width="${width - outer * 2}" height="${height - Math.round(112 * scale)}" fill="#0a0a0f" opacity="0.72" />
+  <rect x="${cardX}" y="${cardY}" width="${cardWidth}" height="${cardHeight}" rx="${Math.round(10 * scale)}" fill="url(#card-shade)" stroke="rgba(255,255,255,0.08)" />
+  <line x1="${cardX}" y1="${cardY + cardHeight - Math.round(96 * scale)}" x2="${cardX + cardWidth}" y2="${cardY + cardHeight - Math.round(96 * scale)}" stroke="rgba(255,255,255,0.06)" />
+  ${cells}
+  <text x="${labelX}" y="${labelY}" fill="#8a8a96" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(22 * scale)}" letter-spacing="${0.4 * scale}">
+    wired confess
+  </text>
+  <text x="${bodyX}" y="${bodyY}" fill="#e8e8ec" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${fontSize}" line-height="${lineHeight}">
+    ${bodyTspans}
+  </text>
+  <g font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(19 * scale)}" fill="#8a8a96">
+    <text x="${bodyX}" y="${metaY}" fill="#5eead4" filter="url(#signal-glow)">signal ${signal}</text>
+    <text x="${bodyX + Math.round(150 * scale)}" y="${metaY}">now</text>
+    <text x="${cardX + cardWidth - Math.round(340 * scale)}" y="${metaY}" fill="#5eead4">read the thread</text>
+  </g>
+  <text x="${bodyX}" y="${cardY + cardHeight - Math.round(22 * scale)}" fill="#4a4a56" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(15 * scale)}">
+    ${escapeXml(shortEvent)} / wiredsignal.online
+  </text>
+</svg>`;
+}
+
+async function renderConfessXImage({ text, eventId, pubkey }) {
+  const svg = confessPostcardSvg({ text, eventId, pubkey });
+  const buffer = await sharp(Buffer.from(svg), {
+    limitInputPixels: confessXImageWidth * confessXImageHeight * 2,
+  })
+    .png({ compressionLevel: 9, adaptiveFiltering: true })
+    .toBuffer();
+  const imageHash = crypto.createHash("sha256").update(buffer).digest("hex");
+  if (buffer.byteLength > confessXImageMaxBytes) {
+    const error = new Error(`generated X image exceeds ${confessXImageMaxBytes} bytes`);
+    error.imageHash = imageHash;
+    error.imageBytes = buffer.byteLength;
+    throw error;
+  }
+  return {
+    buffer,
+    imageHash,
+    imageBytes: buffer.byteLength,
+    width: confessXImageWidth,
+    height: confessXImageHeight,
+    template: confessXImageTemplate,
+  };
+}
+
 const xMentionPattern = /(^|[^a-z0-9_])@[a-z0-9_]{1,15}\b/i;
 const xHashtagPattern = /(^|[^a-z0-9_])#[\p{L}\p{N}_]+/iu;
 const xCashtagPattern = /(^|[^a-z0-9_])\$[a-z]{1,8}\b/i;
@@ -822,6 +1027,7 @@ function initialConfessXMirror(event, store) {
   const base = {
     enabled: confessXConfig.enabled,
     dryRun: confessXConfig.dryRun,
+    postMode: "image",
     accountHandle: confessXConfig.accountHandle || null,
     threadUrl: confessXThreadUrl(event.id),
     updatedAt: now,
@@ -854,8 +1060,10 @@ function initialConfessXMirror(event, store) {
     attempts: 0,
     nextAttemptAt: now,
     text,
+    pubkey: event.pubkey,
     textHash: safety.textHash,
     textLength: text.length,
+    imageTemplate: confessXImageTemplate,
   };
 }
 
@@ -912,10 +1120,27 @@ function buildConfessXThreadReplyText(eventId) {
 
 async function postConfessXText(text, existingMirror, eventId) {
   if (confessXConfig.dryRun) {
+    const dryRunPatch = {};
+    try {
+      const rendered = await renderConfessXImage({
+        text,
+        eventId,
+        pubkey: existingMirror?.pubkey || "",
+      });
+      dryRunPatch.imageHash = rendered.imageHash;
+      dryRunPatch.imageBytes = rendered.imageBytes;
+      dryRunPatch.imageWidth = rendered.width;
+      dryRunPatch.imageHeight = rendered.height;
+      dryRunPatch.imageTemplate = rendered.template;
+    } catch (error) {
+      dryRunPatch.reason =
+        error instanceof Error ? `X dry-run image render failed: ${error.message}` : "X dry-run image render failed";
+    }
     return {
       ...existingMirror,
+      ...dryRunPatch,
       status: "dry_run",
-      reason: "X dry-run mode",
+      reason: dryRunPatch.reason || "X dry-run mode",
       retryable: false,
       attempts: Number(existingMirror?.attempts || 0) + 1,
       nextAttemptAt: null,
@@ -929,30 +1154,77 @@ async function postConfessXText(text, existingMirror, eventId) {
     return failedConfessXMirror(existingMirror, "X OAuth1 credentials are not configured", false);
   }
 
+  let mediaId = existingMirror?.mediaId || null;
+  let imagePatch = {};
+  if (!mediaId) {
+    try {
+      const rendered = await renderConfessXImage({
+        text,
+        eventId,
+        pubkey: existingMirror?.pubkey || "",
+      });
+      imagePatch = {
+        imageHash: rendered.imageHash,
+        imageBytes: rendered.imageBytes,
+        imageWidth: rendered.width,
+        imageHeight: rendered.height,
+        imageTemplate: rendered.template,
+      };
+      const uploadResponse = await uploadConfessXImage(rendered.buffer);
+      const uploadPayload = await readJsonResponse(uploadResponse);
+      if (!uploadResponse.ok || !uploadPayload?.data?.id) {
+        const reason = `X media upload failed (${uploadResponse.status}): ${summarizeXError(uploadPayload)}`;
+        const retryable = uploadResponse.status === 429 || uploadResponse.status >= 500;
+        return failedConfessXMirror(existingMirror, reason, retryable, imagePatch);
+      }
+      mediaId = uploadPayload.data.id;
+      imagePatch.mediaId = mediaId;
+      imagePatch.mediaUploadedAt = Date.now();
+    } catch (error) {
+      const reason =
+        error instanceof Error ? `X image render/upload failed: ${error.message}` : "X image render/upload failed";
+      return failedConfessXMirror(existingMirror, reason, true, {
+        ...imagePatch,
+        imageHash: error?.imageHash || imagePatch.imageHash,
+        imageBytes: error?.imageBytes || imagePatch.imageBytes,
+      });
+    }
+  }
+
   let tweetId = existingMirror?.tweetId || null;
   let postedAt = existingMirror?.postedAt || null;
   if (!tweetId) {
-    const response = await postConfessXOAuth1Request(text);
+    const response = await postConfessXOAuth1Request(
+      buildConfessXTweetText(),
+      {
+        mediaIds: mediaId ? [mediaId] : [],
+      },
+    );
     const payload = await readJsonResponse(response);
     if (!response.ok || !payload?.data?.id) {
       const reason = `X post failed (${response.status}): ${summarizeXError(payload)}`;
       const retryable = response.status === 429 || response.status >= 500;
-      return failedConfessXMirror(existingMirror, reason, retryable);
+      return failedConfessXMirror(existingMirror, reason, retryable, imagePatch);
     }
     tweetId = payload.data.id;
     postedAt = Date.now();
   }
 
   const threadReplyText = buildConfessXThreadReplyText(eventId);
-  const replyResponse = await postConfessXOAuth1Request(threadReplyText, tweetId);
+  const replyResponse = await postConfessXOAuth1Request(threadReplyText, {
+    inReplyToTweetId: tweetId,
+  });
   const replyPayload = await readJsonResponse(replyResponse);
   if (replyResponse.ok && replyPayload?.data?.id) {
     return {
       ...existingMirror,
+      ...imagePatch,
       status: "posted",
       reason: "",
       retryable: false,
       attempts: Number(existingMirror?.attempts || 0) + 1,
+      postMode: "image",
+      mediaId: mediaId || undefined,
       tweetId,
       replyTweetId: replyPayload.data.id,
       threadUrl: confessXThreadUrl(eventId),
@@ -966,6 +1238,9 @@ async function postConfessXText(text, existingMirror, eventId) {
   const reason = `X thread reply failed (${replyResponse.status}): ${summarizeXError(replyPayload)}`;
   const retryable = replyResponse.status === 429 || replyResponse.status >= 500;
   return failedConfessXMirror(existingMirror, reason, retryable, {
+    ...imagePatch,
+    postMode: "image",
+    mediaId: mediaId || undefined,
     tweetId,
     threadUrl: confessXThreadUrl(eventId),
     postedAt,
@@ -1024,11 +1299,17 @@ function oauth1AuthorizationHeader(method, url) {
     .join(", ")}`;
 }
 
-async function postConfessXOAuth1Request(text, inReplyToTweetId = null) {
+async function postConfessXOAuth1Request(
+  text,
+  { inReplyToTweetId = null, mediaIds = [] } = {},
+) {
   const url = "https://api.x.com/2/tweets";
   const body = { text };
   if (inReplyToTweetId) {
     body.reply = { in_reply_to_tweet_id: inReplyToTweetId };
+  }
+  if (mediaIds.length > 0) {
+    body.media = { media_ids: mediaIds };
   }
   return withTimeout(
     fetch(url, {
@@ -1041,6 +1322,26 @@ async function postConfessXOAuth1Request(text, inReplyToTweetId = null) {
     }),
     confessXPostTimeoutMs,
     "X post",
+  );
+}
+
+async function uploadConfessXImage(buffer) {
+  const url = "https://api.x.com/2/media/upload";
+  const form = new FormData();
+  form.append("media_category", "tweet_image");
+  form.append("media_type", "image/png");
+  form.append("media", new Blob([buffer], { type: "image/png" }), "wired-confess.png");
+
+  return withTimeout(
+    fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: oauth1AuthorizationHeader("POST", url),
+      },
+      body: form,
+    }),
+    confessXPostTimeoutMs,
+    "X media upload",
   );
 }
 
@@ -1123,8 +1424,15 @@ function confessXStatusFromStore(store) {
     configured: confessXConfigured(),
     authMode: confessXAuthMode(),
     accountHandle: confessXConfig.accountHandle || null,
+    postMode: "image",
     safetyMode: confessXConfig.safetyMode,
     maxLength: confessXMaxLength,
+    image: {
+      width: confessXImageWidth,
+      height: confessXImageHeight,
+      template: confessXImageTemplate,
+      maxBytes: confessXImageMaxBytes,
+    },
     retrySeconds: confessXRetrySeconds,
     maxAttempts: confessXMaxAttempts,
     threadBaseUrl: confessXThreadBaseUrl,
@@ -1140,6 +1448,9 @@ function publicConfessXMirror(mirror) {
     tweetId: mirror.tweetId || undefined,
     replyTweetId: mirror.replyTweetId || undefined,
     threadUrl: mirror.threadUrl || undefined,
+    postMode: mirror.postMode || undefined,
+    imageHash: mirror.imageHash || undefined,
+    imageBytes: mirror.imageBytes || undefined,
     retryable: mirror.retryable,
     attempts: mirror.attempts,
     nextAttemptAt: mirror.nextAttemptAt,
@@ -1942,8 +2253,39 @@ app.get("/api/confess/status", async (_req, res) => {
       configured: confessXConfigured(),
       authMode: confessXAuthMode(),
       accountHandle: confessXConfig.accountHandle || null,
+      postMode: "image",
+      image: {
+        width: confessXImageWidth,
+        height: confessXImageHeight,
+        template: confessXImageTemplate,
+      },
     },
   });
+});
+
+app.get("/api/confess/x-image-preview", async (req, res) => {
+  try {
+    const secretKey = parseConfessSecretKey();
+    const text = String(
+      req.query.text ||
+        "some things are easier to say when the signal does not point back at you.",
+    ).slice(0, confessContentMaxLength);
+    const eventId = crypto.createHash("sha256").update(`preview:${text}`).digest("hex");
+    const rendered = await renderConfessXImage({
+      text: buildConfessXPostText(text),
+      eventId,
+      pubkey: secretKey ? getPublicKey(secretKey) : "preview",
+    });
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("X-Confess-Image-Hash", rendered.imageHash);
+    res.setHeader("X-Confess-Image-Bytes", String(rendered.imageBytes));
+    res.send(rendered.buffer);
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "image preview failed",
+    });
+  }
 });
 
 app.post("/api/confess", async (req, res) => {

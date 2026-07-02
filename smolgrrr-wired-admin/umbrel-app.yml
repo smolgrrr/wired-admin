@@ -3,7 +3,7 @@ id: smolgrrr-wired-admin
 category: social
 name: Wired Admin
 icon: https://raw.githubusercontent.com/smolgrrr/wired-admin/main/smolgrrr-wired-admin/icon.png
-version: "0.2.5"
+version: "0.2.6"
 tagline: Admin console for Wired relay, feed, and moderation
 description: >-
   Wired Admin runs a strfry Nostr relay behind a lightweight gateway that
@@ -24,7 +24,6 @@ defaultPassword: ""
 deterministicPassword: false
 torOnly: false
 releaseNotes: >-
-  Keeps the Umbrel console and moderation management local-only while allowing
-  public hostnames to serve only relay traffic, feed snapshots, and moderation
-  manifests. Adds public-host protection for Vercel preview and Tor onion
-  hostnames.
+  Confess X mirrors now post a generated Wired postcard image instead of the
+  confession text directly, while keeping strict X safety filtering, Nostr-first
+  posting, and the thread URL follow-up reply.

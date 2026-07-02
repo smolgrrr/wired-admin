@@ -2,6 +2,8 @@ FROM node:22-alpine
 
 WORKDIR /app
 
+RUN apk add --no-cache font-dejavu
+
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 
