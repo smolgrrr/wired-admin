@@ -8,7 +8,7 @@ services:
       PROXY_AUTH_ADD: "false"
 
   web:
-    image: ghcr.io/smolgrrr/wired-admin-web:0.2.4
+    image: ghcr.io/smolgrrr/wired-admin-web:0.2.5
     restart: on-failure
     stop_grace_period: 30s
     environment:
@@ -48,7 +48,7 @@ services:
       RELAY_ICON: "https://raw.githubusercontent.com/smolgrrr/wired-admin/main/smolgrrr-wired-admin/icon.png"
       RELAY_MIN_POW: "16"
       RELAY_SOFTWARE: "https://github.com/smolgrrr/wired-admin"
-      RELAY_VERSION: "0.2.4"
+      RELAY_VERSION: "0.2.5"
     volumes:
       - ${APP_DATA_DIR}/data/web:/app/data
     depends_on:
