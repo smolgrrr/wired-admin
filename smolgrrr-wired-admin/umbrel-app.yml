@@ -3,7 +3,7 @@ id: smolgrrr-wired-admin
 category: social
 name: Wired Admin
 icon: https://raw.githubusercontent.com/smolgrrr/wired-admin/main/smolgrrr-wired-admin/icon.png
-version: "0.2.6"
+version: "0.2.7"
 tagline: Admin console for Wired relay, feed, and moderation
 description: >-
   Wired Admin runs a strfry Nostr relay behind a lightweight gateway that
@@ -24,6 +24,6 @@ defaultPassword: ""
 deterministicPassword: false
 torOnly: false
 releaseNotes: >-
-  Confess X mirrors now post a generated Wired postcard image instead of the
-  confession text directly, while keeping strict X safety filtering, Nostr-first
-  posting, and the thread URL follow-up reply.
+  Feed snapshots now include quoted or mentioned posts and depth-2 replies, so
+  Wired clients can open covered threads and quote previews faster from the
+  snapshot before live relay updates arrive.

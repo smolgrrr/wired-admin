@@ -118,7 +118,7 @@ const relayInfo = {
   software:
     process.env.RELAY_SOFTWARE ||
     "https://github.com/smolgrrr/wired-admin",
-  version: process.env.RELAY_VERSION || "0.2.6",
+  version: process.env.RELAY_VERSION || "0.2.7",
   limitation: {
     auth_required: false,
     payment_required: false,
@@ -1668,6 +1668,10 @@ function normalizeRelayUrl(url) {
   return url.replace(/\/+$/, "");
 }
 
+function uniqueRelays(relays) {
+  return [...new Set(relays.map(normalizeRelayUrl).filter(Boolean))];
+}
+
 function addRelayHint(relayHintsByEventId, eventId, relayUrl) {
   const normalizedRelay = normalizeRelayUrl(relayUrl);
   const existing = relayHintsByEventId.get(eventId) || [];
@@ -1686,6 +1690,88 @@ function mergeRelayHints(...hintGroups) {
   });
 
   return merged;
+}
+
+function mergeEvents(...eventGroups) {
+  const merged = new Map();
+  eventGroups.forEach((events) => {
+    events.forEach((event) => merged.set(event.id, event));
+  });
+  return [...merged.values()];
+}
+
+function serializeRelayHints(relayHintsByEventId) {
+  return Object.fromEntries(
+    [...relayHintsByEventId.entries()].map(([eventId, relays]) => [
+      eventId,
+      uniqueRelays(relays),
+    ]),
+  );
+}
+
+const eventIdPattern = /^[0-9a-f]{64}$/i;
+const nostrRefPattern = /nostr:(?:note|nevent|naddr|npub|nprofile|nrelay)1[a-z0-9]+/gi;
+
+function decodeNostrEventRef(ref) {
+  const bech32 = String(ref || "").replace(/^nostr:/i, "");
+  try {
+    const decoded = nip19.decode(bech32);
+    if (decoded.type === "note") {
+      return { id: decoded.data, relays: [] };
+    }
+    if (decoded.type === "nevent") {
+      return {
+        id: decoded.data.id,
+        relays: uniqueRelays(decoded.data.relays || []),
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function addReferencedEventRef(refsById, id, relays = []) {
+  if (!eventIdPattern.test(id)) return;
+
+  const normalizedId = id.toLowerCase();
+  const existing = refsById.get(normalizedId);
+  if (existing) {
+    existing.relays = uniqueRelays([...existing.relays, ...relays]);
+    return;
+  }
+  refsById.set(normalizedId, { id: normalizedId, relays: uniqueRelays(relays) });
+}
+
+function extractMentionedEventRefs(event) {
+  const refsById = new Map();
+
+  for (const tag of event.tags || []) {
+    if ((tag[0] === "q" || tag[0] === "e") && tag[1]) {
+      const relayHint = tag[2] ? normalizeRelayUrl(tag[2]) : undefined;
+
+      if (eventIdPattern.test(tag[1])) {
+        addReferencedEventRef(refsById, tag[1], relayHint ? [relayHint] : []);
+        continue;
+      }
+
+      const decoded = decodeNostrEventRef(tag[1]);
+      if (decoded) {
+        addReferencedEventRef(
+          refsById,
+          decoded.id,
+          relayHint ? [...decoded.relays, relayHint] : decoded.relays,
+        );
+      }
+    }
+  }
+
+  for (const match of String(event.content || "").matchAll(nostrRefPattern)) {
+    const decoded = decodeNostrEventRef(match[0]);
+    if (decoded) addReferencedEventRef(refsById, decoded.id, decoded.relays);
+  }
+
+  return [...refsById.values()];
 }
 
 async function connectRelays(urls) {
@@ -1917,6 +2003,86 @@ function processFeedEvents(events, relayHintsByEventId = new Map()) {
     .sort((a, b) => b.totalWork - a.totalWork || b.postEvent.created_at - a.postEvent.created_at);
 }
 
+function snapshotReferenceRefs(processedEvents) {
+  const byId = new Map();
+
+  processedEvents.forEach((processed) => {
+    extractMentionedEventRefs(processed.postEvent).forEach((ref) => {
+      const existing = byId.get(ref.id);
+      if (existing) {
+        existing.relays = uniqueRelays([...existing.relays, ...ref.relays]);
+        return;
+      }
+      byId.set(ref.id, { id: ref.id, relays: uniqueRelays(ref.relays) });
+    });
+  });
+
+  return [...byId.values()];
+}
+
+async function fetchReferencedEvents(refs, knownEventIds) {
+  const missingRefs = refs.filter((ref) => !knownEventIds.has(ref.id));
+  if (missingRefs.length === 0) {
+    return { events: [], relayHintsByEventId: new Map() };
+  }
+
+  const relayUrls = uniqueRelays([
+    ...threadRelays,
+    ...missingRefs.flatMap((ref) => ref.relays),
+  ]);
+  const relays = await connectRelays(relayUrls);
+
+  try {
+    const referencedBatch = await subscribeOnce(
+      relays,
+      {
+        ids: missingRefs.map((ref) => ref.id),
+        kinds: [1, 1068],
+        limit: missingRefs.length,
+      },
+      relayUrls,
+    );
+
+    const replyEvents = [];
+    const seenReplyIds = new Set();
+    const replyRelayHintsByEventId = new Map();
+    const since = sinceFromAgeHours(snapshotAgeHours);
+    let parentIds = referencedBatch.events.map((event) => event.id);
+
+    for (let depth = 0; depth < replyFetchDepth && parentIds.length > 0; depth += 1) {
+      const replyFilter = buildReplyFilter(parentIds, since);
+      if (!replyFilter) break;
+
+      const replyBatch = await subscribeOnce(relays, replyFilter, relayUrls);
+      const nextParentIds = [];
+
+      replyBatch.relayHintsByEventId.forEach((relays, eventId) => {
+        relays.forEach((relay) => addRelayHint(replyRelayHintsByEventId, eventId, relay));
+      });
+
+      replyBatch.events.forEach((event) => {
+        if (knownEventIds.has(event.id) || seenReplyIds.has(event.id)) return;
+
+        seenReplyIds.add(event.id);
+        replyEvents.push(event);
+        nextParentIds.push(event.id);
+      });
+
+      parentIds = nextParentIds;
+    }
+
+    return {
+      events: mergeEvents(referencedBatch.events, replyEvents),
+      relayHintsByEventId: mergeRelayHints(
+        referencedBatch.relayHintsByEventId,
+        replyRelayHintsByEventId,
+      ),
+    };
+  } finally {
+    closeRelays(relays);
+  }
+}
+
 function parseProfileEvent(event) {
   if (event.kind !== 0) return null;
   try {
@@ -1978,6 +2144,9 @@ async function loadSnapshotFromDisk() {
     if (
       typeof cached.fetchedAt === "number" &&
       Array.isArray(cached.processedEvents) &&
+      Array.isArray(cached.events) &&
+      cached.relayHintsByEventId &&
+      typeof cached.relayHintsByEventId === "object" &&
       cached.profiles &&
       typeof cached.profiles === "object"
     ) {
@@ -1994,17 +2163,46 @@ async function persistSnapshot(nextSnapshot) {
 }
 
 async function fetchFeedSnapshot() {
-  const { events, relayHintsByEventId } = await fetchGlobalFeedEvents();
+  const feedBatch = await fetchGlobalFeedEvents();
   const manifest = await getModerationManifest();
-  const visibleEvents =
-    manifest.updatedAt === 0 ? events : events.filter((event) => !isEventModerated(event, manifest));
-  const processedEvents = processFeedEvents(visibleEvents, relayHintsByEventId);
-  const pubkeys = [...new Set(processedEvents.map((processed) => processed.postEvent.pubkey))];
+  const visibleFeedEvents =
+    manifest.updatedAt === 0
+      ? feedBatch.events
+      : feedBatch.events.filter((event) => !isEventModerated(event, manifest));
+  const processedEvents = processFeedEvents(
+    visibleFeedEvents,
+    feedBatch.relayHintsByEventId,
+  );
+  const knownEventIds = new Set(visibleFeedEvents.map((event) => event.id));
+  const referencedBatch = await fetchReferencedEvents(
+    snapshotReferenceRefs(processedEvents),
+    knownEventIds,
+  );
+  const visibleReferencedEvents =
+    manifest.updatedAt === 0
+      ? referencedBatch.events
+      : referencedBatch.events.filter((event) => !isEventModerated(event, manifest));
+  const events = mergeEvents(visibleFeedEvents, visibleReferencedEvents);
+  const relayHintsByEventId = mergeRelayHints(
+    feedBatch.relayHintsByEventId,
+    referencedBatch.relayHintsByEventId,
+  );
+  const pubkeys = [
+    ...new Set([
+      ...processedEvents.flatMap((processed) => [
+        processed.postEvent.pubkey,
+        ...processed.replies.map((reply) => reply.pubkey),
+      ]),
+      ...visibleReferencedEvents.map((event) => event.pubkey),
+    ]),
+  ];
   const profiles = await fetchProfileMetadata(pubkeys);
 
   return {
     fetchedAt: Date.now(),
     processedEvents,
+    events,
+    relayHintsByEventId: serializeRelayHints(relayHintsByEventId),
     profiles,
   };
 }
@@ -2034,6 +2232,8 @@ function snapshotStatus() {
   return {
     fetchedAt: snapshot?.fetchedAt || null,
     postCount: snapshot?.processedEvents?.length || 0,
+    eventCount: snapshot?.events?.length || 0,
+    relayHintCount: snapshot ? Object.keys(snapshot.relayHintsByEventId || {}).length : 0,
     profileCount: snapshot ? Object.keys(snapshot.profiles).length : 0,
     refreshing: Boolean(refreshPromise),
     lastRefreshError,
