@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -72,6 +73,9 @@ const confessXThreadBaseUrl = String(
 )
   .trim()
   .replace(/\/+$/, "");
+const confessXThreadRelays = envList("CONFESS_X_THREAD_RELAYS", [
+  "wss://relay.wiredsignal.online",
+]);
 const confessXImageWidth = Math.max(
   600,
   Math.min(2400, Number(process.env.CONFESS_X_IMAGE_WIDTH || 1200)),
@@ -89,9 +93,14 @@ const confessXImageTemplate = String(
 )
   .trim()
   .toLowerCase();
-const confessXImagePostText = String(
-  process.env.CONFESS_X_IMAGE_POST_TEXT || "new anonymous postcard on wired",
-).trim();
+const confessXProfileImageTimeoutMs = Math.max(
+  1000,
+  Number(process.env.CONFESS_X_PROFILE_IMAGE_TIMEOUT_MS || 4000),
+);
+const confessXProfileImageMaxBytes = Math.max(
+  10_000,
+  Math.min(2_000_000, Number(process.env.CONFESS_X_PROFILE_IMAGE_MAX_BYTES || 1_000_000)),
+);
 const confessXConfig = {
   enabled: envFlag("CONFESS_X_ENABLED", false),
   dryRun: envFlag("CONFESS_X_DRY_RUN", true),
@@ -118,7 +127,7 @@ const relayInfo = {
   software:
     process.env.RELAY_SOFTWARE ||
     "https://github.com/smolgrrr/wired-admin",
-  version: process.env.RELAY_VERSION || "0.2.7",
+  version: process.env.RELAY_VERSION || "0.2.8",
   limitation: {
     auth_required: false,
     payment_required: false,
@@ -771,7 +780,7 @@ function buildConfessXPostText(content) {
 }
 
 function buildConfessXTweetText() {
-  return confessXImagePostText || "new anonymous postcard on wired";
+  return "";
 }
 
 function escapeXml(value) {
@@ -853,7 +862,43 @@ function avatarCellsForPubkey(pubkey) {
   return Array.from({ length: 16 }, (_, index) => (digest[index] & 1) === 1);
 }
 
-function confessPostcardSvg({ text, eventId, pubkey }) {
+function truncateSvgLabel(value, maxLength) {
+  const label = String(value || "").replace(/\s+/g, " ").trim();
+  if (label.length <= maxLength) return label;
+  return `${label.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+}
+
+function confessProfileDisplayName(profile, pubkey) {
+  if (profile?.displayName) return profile.displayName;
+  if (profile?.name) return profile.name;
+  try {
+    return truncateSvgLabel(nip19.npubEncode(pubkey), 18);
+  } catch {
+    return "wired confess";
+  }
+}
+
+function safeProfileImageMarkup({ imageDataUri, cells, cardX, headerY, scale }) {
+  const avatarX = cardX + Math.round(42 * scale);
+  const avatarY = headerY - Math.round(24 * scale);
+  const avatarSize = Math.round(48 * scale);
+  const avatarRadius = Math.round(avatarSize / 2);
+  const avatarCenterX = avatarX + avatarRadius;
+  const avatarCenterY = avatarY + avatarRadius;
+
+  if (imageDataUri) {
+    return `
+  <clipPath id="profile-avatar-clip">
+    <circle cx="${avatarCenterX}" cy="${avatarCenterY}" r="${avatarRadius}" />
+  </clipPath>
+  <image href="${escapeXml(imageDataUri)}" x="${avatarX}" y="${avatarY}" width="${avatarSize}" height="${avatarSize}" preserveAspectRatio="xMidYMid slice" clip-path="url(#profile-avatar-clip)" />
+  <circle cx="${avatarCenterX}" cy="${avatarCenterY}" r="${avatarRadius}" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="${Math.max(1, Math.round(1 * scale))}" />`;
+  }
+
+  return cells;
+}
+
+function confessPostcardSvg({ text, eventId, pubkey, profile, profileImageDataUri }) {
   const width = confessXImageWidth;
   const height = confessXImageHeight;
   const scale = width / 1200;
@@ -892,6 +937,14 @@ function confessPostcardSvg({ text, eventId, pubkey }) {
   const labelX = cardX + Math.round(92 * scale);
   const labelY = headerY + Math.round(11 * scale);
   const metaY = cardY + cardHeight - Math.round(54 * scale);
+  const profileName = truncateSvgLabel(confessProfileDisplayName(profile, pubkey), 36);
+  const profileAvatar = safeProfileImageMarkup({
+    imageDataUri: profileImageDataUri,
+    cells,
+    cardX,
+    headerY,
+    scale,
+  });
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
@@ -912,9 +965,9 @@ function confessPostcardSvg({ text, eventId, pubkey }) {
   <rect x="${outer}" y="${Math.round(56 * scale)}" width="${width - outer * 2}" height="${height - Math.round(112 * scale)}" fill="#0a0a0f" opacity="0.72" />
   <rect x="${cardX}" y="${cardY}" width="${cardWidth}" height="${cardHeight}" rx="${Math.round(10 * scale)}" fill="url(#card-shade)" stroke="rgba(255,255,255,0.08)" />
   <line x1="${cardX}" y1="${cardY + cardHeight - Math.round(96 * scale)}" x2="${cardX + cardWidth}" y2="${cardY + cardHeight - Math.round(96 * scale)}" stroke="rgba(255,255,255,0.06)" />
-  ${cells}
+  ${profileAvatar}
   <text x="${labelX}" y="${labelY}" fill="#8a8a96" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(22 * scale)}" letter-spacing="${0.4 * scale}">
-    wired confess
+    ${escapeXml(profileName)}
   </text>
   <text x="${bodyX}" y="${bodyY}" fill="#e8e8ec" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${fontSize}" line-height="${lineHeight}">
     ${bodyTspans}
@@ -922,7 +975,6 @@ function confessPostcardSvg({ text, eventId, pubkey }) {
   <g font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(19 * scale)}" fill="#8a8a96">
     <text x="${bodyX}" y="${metaY}" fill="#5eead4" filter="url(#signal-glow)">signal ${signal}</text>
     <text x="${bodyX + Math.round(150 * scale)}" y="${metaY}">now</text>
-    <text x="${cardX + cardWidth - Math.round(340 * scale)}" y="${metaY}" fill="#5eead4">read the thread</text>
   </g>
   <text x="${bodyX}" y="${cardY + cardHeight - Math.round(22 * scale)}" fill="#4a4a56" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(15 * scale)}">
     ${escapeXml(shortEvent)} / wiredsignal.online
@@ -930,8 +982,97 @@ function confessPostcardSvg({ text, eventId, pubkey }) {
 </svg>`;
 }
 
+function isPrivateIpv4(hostname) {
+  const parts = hostname.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+
+  const [first, second] = parts;
+  return (
+    first === 10 ||
+    first === 127 ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168)
+  );
+}
+
+function isSafeProfileImageUrl(value) {
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (parsed.protocol !== "https:") return false;
+    if (!hostname || hostname === "localhost" || hostname.endsWith(".local")) return false;
+    if (net.isIPv4(hostname) && isPrivateIpv4(hostname)) return false;
+    if (net.isIPv6(hostname) && (hostname === "::1" || hostname.startsWith("fc") || hostname.startsWith("fd"))) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchConfessXProfileImageDataUri(url) {
+  if (!url || !isSafeProfileImageUrl(url)) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), confessXProfileImageTimeoutMs);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { Accept: "image/*" },
+    });
+    if (!response.ok) return null;
+
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (contentType && !contentType.startsWith("image/")) return null;
+
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (contentLength > confessXProfileImageMaxBytes) return null;
+
+    const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > confessXProfileImageMaxBytes) return null;
+
+    const png = await sharp(Buffer.from(arrayBuffer), {
+      limitInputPixels: 4096 * 4096,
+    })
+      .resize(128, 128, { fit: "cover" })
+      .png({ compressionLevel: 9, adaptiveFiltering: true })
+      .toBuffer();
+    return `data:image/png;base64,${png.toString("base64")}`;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveConfessXProfile(pubkey) {
+  if (!/^[0-9a-f]{64}$/i.test(String(pubkey || ""))) {
+    return { profile: null, imageDataUri: null };
+  }
+
+  try {
+    const profiles = await fetchProfileMetadata([pubkey]);
+    const profile = profiles[pubkey] || null;
+    const imageDataUri = await fetchConfessXProfileImageDataUri(profile?.picture);
+    return { profile, imageDataUri };
+  } catch {
+    return { profile: null, imageDataUri: null };
+  }
+}
+
 async function renderConfessXImage({ text, eventId, pubkey }) {
-  const svg = confessPostcardSvg({ text, eventId, pubkey });
+  const { profile, imageDataUri } = await resolveConfessXProfile(pubkey);
+  const svg = confessPostcardSvg({
+    text,
+    eventId,
+    pubkey,
+    profile,
+    profileImageDataUri: imageDataUri,
+  });
   const buffer = await sharp(Buffer.from(svg), {
     limitInputPixels: confessXImageWidth * confessXImageHeight * 2,
   })
@@ -1029,7 +1170,7 @@ function initialConfessXMirror(event, store) {
     dryRun: confessXConfig.dryRun,
     postMode: "image",
     accountHandle: confessXConfig.accountHandle || null,
-    threadUrl: confessXThreadUrl(event.id),
+    threadUrl: confessXThreadUrl(event.id, event.pubkey),
     updatedAt: now,
   };
 
@@ -1110,12 +1251,23 @@ function failedConfessXMirror(existing, reason, retryable, patch = {}) {
   };
 }
 
-function confessXThreadUrl(eventId) {
-  return `${confessXThreadBaseUrl}/${encodeURIComponent(eventId)}`;
+function confessXThreadRef(eventId, pubkey = "") {
+  if (!/^[0-9a-f]{64}$/i.test(String(eventId || ""))) return String(eventId || "");
+
+  const pointer = {
+    id: eventId,
+    relays: uniqueRelays(confessXThreadRelays),
+  };
+  if (/^[0-9a-f]{64}$/i.test(String(pubkey || ""))) pointer.author = pubkey;
+  return nip19.neventEncode(pointer);
 }
 
-function buildConfessXThreadReplyText(eventId) {
-  return `thread: ${confessXThreadUrl(eventId)}`;
+function confessXThreadUrl(eventId, pubkey = "") {
+  return `${confessXThreadBaseUrl}/${encodeURIComponent(confessXThreadRef(eventId, pubkey))}`;
+}
+
+function buildConfessXThreadReplyText(eventId, pubkey = "") {
+  return `thread: ${confessXThreadUrl(eventId, pubkey)}`;
 }
 
 async function postConfessXText(text, existingMirror, eventId) {
@@ -1144,7 +1296,7 @@ async function postConfessXText(text, existingMirror, eventId) {
       retryable: false,
       attempts: Number(existingMirror?.attempts || 0) + 1,
       nextAttemptAt: null,
-      threadUrl: eventId ? confessXThreadUrl(eventId) : existingMirror?.threadUrl,
+      threadUrl: eventId ? confessXThreadUrl(eventId, existingMirror?.pubkey) : existingMirror?.threadUrl,
       postedAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -1210,7 +1362,7 @@ async function postConfessXText(text, existingMirror, eventId) {
     postedAt = Date.now();
   }
 
-  const threadReplyText = buildConfessXThreadReplyText(eventId);
+  const threadReplyText = buildConfessXThreadReplyText(eventId, existingMirror?.pubkey);
   const replyResponse = await postConfessXOAuth1Request(threadReplyText, {
     inReplyToTweetId: tweetId,
   });
@@ -1227,7 +1379,7 @@ async function postConfessXText(text, existingMirror, eventId) {
       mediaId: mediaId || undefined,
       tweetId,
       replyTweetId: replyPayload.data.id,
-      threadUrl: confessXThreadUrl(eventId),
+      threadUrl: confessXThreadUrl(eventId, existingMirror?.pubkey),
       nextAttemptAt: null,
       postedAt,
       repliedAt: Date.now(),
@@ -1242,7 +1394,7 @@ async function postConfessXText(text, existingMirror, eventId) {
     postMode: "image",
     mediaId: mediaId || undefined,
     tweetId,
-    threadUrl: confessXThreadUrl(eventId),
+    threadUrl: confessXThreadUrl(eventId, existingMirror?.pubkey),
     postedAt,
   });
 }
@@ -1304,7 +1456,9 @@ async function postConfessXOAuth1Request(
   { inReplyToTweetId = null, mediaIds = [] } = {},
 ) {
   const url = "https://api.x.com/2/tweets";
-  const body = { text };
+  const body = {};
+  const trimmedText = String(text || "").trim();
+  if (trimmedText) body.text = trimmedText;
   if (inReplyToTweetId) {
     body.reply = { in_reply_to_tweet_id: inReplyToTweetId };
   }
