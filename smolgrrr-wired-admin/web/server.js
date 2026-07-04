@@ -1,19 +1,20 @@
 import crypto from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import http from "node:http";
-import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import sharp from "sharp";
-import {
-  finalizeEvent,
-  getEventHash,
-  getPublicKey,
-  nip19,
-  Relay,
-} from "nostr-tools";
-import WebSocket, { WebSocketServer } from "ws";
+import { finalizeEvent, getPublicKey, nip19, Relay } from "nostr-tools";
+import { WebSocketServer } from "ws";
+import { envFlag as readEnvFlag, envList as readEnvList, normalizeHost as normalizeConfiguredHost, readJsonResponse as readHttpJsonResponse, summarizeHttpError, uniqueSorted as uniqueSortedValues, withTimeout as withPromiseTimeout } from "./src/utils.js";
+import { verifyPow as verifyEventPow } from "./src/pow.js";
+import { createXClient } from "./src/x-client.js";
+import { createConfessPostcardRenderer } from "./src/confess-postcard-renderer.js";
+import { createModerationService } from "./src/moderation.js";
+import { createFeedSnapshotService } from "./src/feed-snapshot-service.js";
+import { registerHttpRoutes } from "./src/http-routes.js";
+import { createRelayGateway } from "./src/relay-gateway.js";
+import { createHttpAccess } from "./src/http-access.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -35,8 +36,8 @@ const replyFetchDepth = Math.max(
   Math.min(Number(process.env.FEED_SNAPSHOT_REPLY_DEPTH || 2), 2),
 );
 
-const powRelays = envList("POW_RELAYS", ["wss://powrelay.xyz", "wss://pow.relays.land"]);
-const enrichmentRelays = envList("ENRICHMENT_RELAYS", [
+const powRelays = readEnvList("POW_RELAYS", ["wss://powrelay.xyz", "wss://pow.relays.land"]);
+const enrichmentRelays = readEnvList("ENRICHMENT_RELAYS", [
   "wss://relay.damus.io",
   "wss://offchain.pub",
   "wss://nos.lol",
@@ -46,7 +47,7 @@ const enrichmentRelays = envList("ENRICHMENT_RELAYS", [
   "wss://relay.snort.social",
 ]);
 const threadRelays = [...new Set([...powRelays, ...enrichmentRelays])];
-const confessRelays = envList("CONFESS_RELAYS", [backendUrl, ...threadRelays]);
+const confessRelays = readEnvList("CONFESS_RELAYS", [backendUrl, ...threadRelays]);
 const confessDailyLimit = Math.max(1, Number(process.env.CONFESS_DAILY_LIMIT || 6));
 const confessBasePow = Math.max(minPow, Number(process.env.CONFESS_MIN_POW || minPow));
 const confessMaxPow = Math.max(confessBasePow, Number(process.env.CONFESS_MAX_POW || 28));
@@ -73,7 +74,7 @@ const confessXThreadBaseUrl = String(
 )
   .trim()
   .replace(/\/+$/, "");
-const confessXThreadRelays = envList("CONFESS_X_THREAD_RELAYS", [
+const confessXThreadRelays = readEnvList("CONFESS_X_THREAD_RELAYS", [
   "wss://relay.wiredsignal.online",
 ]);
 const confessXImageWidth = Math.max(
@@ -102,8 +103,8 @@ const confessXProfileImageMaxBytes = Math.max(
   Math.min(2_000_000, Number(process.env.CONFESS_X_PROFILE_IMAGE_MAX_BYTES || 1_000_000)),
 );
 const confessXConfig = {
-  enabled: envFlag("CONFESS_X_ENABLED", false),
-  dryRun: envFlag("CONFESS_X_DRY_RUN", true),
+  enabled: readEnvFlag("CONFESS_X_ENABLED", false),
+  dryRun: readEnvFlag("CONFESS_X_DRY_RUN", true),
   oauth1ApiKey: String(process.env.CONFESS_X_OAUTH1_API_KEY || "").trim(),
   oauth1ApiSecret: String(process.env.CONFESS_X_OAUTH1_API_SECRET || "").trim(),
   oauth1AccessToken: String(process.env.CONFESS_X_OAUTH1_ACCESS_TOKEN || "").trim(),
@@ -113,7 +114,21 @@ const confessXConfig = {
   postSuffix: String(process.env.CONFESS_X_POST_SUFFIX || "").trim(),
   safetyMode: String(process.env.CONFESS_X_SAFETY_MODE || "strict").trim().toLowerCase(),
 };
-const publicHostPatterns = envList("PUBLIC_HOSTS", []).map(normalizeHost).filter(Boolean);
+const confessXClient = createXClient(confessXConfig, confessXPostTimeoutMs);
+const moderation = createModerationService(moderationStoreFile);
+const feedSnapshot = createFeedSnapshotService({
+  cacheFile: snapshotCacheFile,
+  refreshSeconds,
+  ageHours: snapshotAgeHours,
+  timeoutMs: snapshotTimeoutMs,
+  replyFetchDepth,
+  minPow,
+  powRelays,
+  enrichmentRelays,
+  threadRelays,
+  moderation,
+});
+const publicHostPatterns = readEnvList("PUBLIC_HOSTS", []).map(normalizeConfiguredHost).filter(Boolean);
 
 const relayInfo = {
   name: process.env.RELAY_NAME || "Wired Admin",
@@ -144,6 +159,7 @@ const securityHeaders = {
   "Permissions-Policy":
     "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()",
 };
+const httpAccess = createHttpAccess({ publicHostPatterns, securityHeaders });
 
 const stats = {
   startedAt: Date.now(),
@@ -165,91 +181,9 @@ const stats = {
   recent: [],
 };
 
-let snapshot = null;
-let lastRefreshError = null;
-let refreshPromise = null;
 let confessLedgerQueue = Promise.resolve();
 let confessXMirrorTimer = null;
 const confessXMirrorInFlight = new Set();
-
-function envList(name, fallback) {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const values = raw
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  return values.length > 0 ? values : fallback;
-}
-
-function envFlag(name, fallback = false) {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") return fallback;
-  return /^(1|true|yes|on)$/i.test(String(raw).trim());
-}
-
-function normalizeHost(value) {
-  const trimmed = String(value || "").trim().toLowerCase();
-  if (!trimmed) return "";
-
-  try {
-    return new URL(trimmed.includes("://") ? trimmed : `http://${trimmed}`).hostname
-      .replace(/\.$/, "");
-  } catch {
-    return trimmed.split(":")[0].replace(/\.$/, "");
-  }
-}
-
-function requestHost(req) {
-  const forwardedHost = String(req.headers["x-forwarded-host"] || "")
-    .split(",")[0]
-    .trim();
-  return normalizeHost(forwardedHost || req.headers.host || "");
-}
-
-function isPublicHost(req) {
-  const host = requestHost(req);
-  return Boolean(host && publicHostPatterns.some((pattern) => hostMatchesPattern(host, pattern)));
-}
-
-function hostMatchesPattern(host, pattern) {
-  if (pattern.startsWith("*.")) {
-    const suffix = pattern.slice(1);
-    return host.endsWith(suffix) && host.length > suffix.length;
-  }
-
-  return host === pattern;
-}
-
-function acceptsNostrJson(req) {
-  return String(req.headers.accept || "").includes("application/nostr+json");
-}
-
-function isPublicHttpRouteAllowed(req) {
-  const url = new URL(req.originalUrl || req.url || "/", "http://localhost");
-
-  if (url.pathname === "/") {
-    return req.method === "GET" && acceptsNostrJson(req);
-  }
-
-  if (url.pathname === "/api/feed/bootstrap") {
-    return req.method === "GET" || req.method === "OPTIONS";
-  }
-
-  if (url.pathname === "/api/moderation/manifest") {
-    return req.method === "GET" || req.method === "OPTIONS";
-  }
-
-  if (url.pathname === "/api/confess/status") {
-    return req.method === "GET" || req.method === "OPTIONS";
-  }
-
-  if (url.pathname === "/api/confess") {
-    return req.method === "POST" || req.method === "OPTIONS";
-  }
-
-  return false;
-}
 
 function addRecent(type, detail) {
   stats.recent.unshift({
@@ -260,285 +194,12 @@ function addRecent(type, detail) {
   stats.recent = stats.recent.slice(0, 50);
 }
 
-function countLeadingZeroBits(hex) {
-  let count = 0;
-  for (const char of hex) {
-    const nibble = Number.parseInt(char, 16);
-    if (Number.isNaN(nibble)) return 0;
-    if (nibble === 0) {
-      count += 4;
-      continue;
-    }
-    return count + Math.clz32(nibble) - 28;
-  }
-  return count;
-}
-
-function eventPow(event) {
-  if (!event || typeof event !== "object" || typeof event.id !== "string") {
-    return 0;
-  }
-  return countLeadingZeroBits(event.id);
-}
-
-function verifyPow(event, requiredPow = minPow) {
-  if (!event || typeof event !== "object") {
-    return { ok: false, reason: "invalid event", pow: 0 };
-  }
-
-  let hash;
-  try {
-    hash = getEventHash(event);
-  } catch {
-    return { ok: false, reason: "invalid event hash", pow: 0 };
-  }
-
-  if (hash !== event.id) {
-    return {
-      ok: false,
-      reason: "event id does not match event hash",
-      pow: countLeadingZeroBits(hash),
-    };
-  }
-
-  const pow = countLeadingZeroBits(hash);
-  const nonceTag = Array.isArray(event.tags)
-    ? event.tags.find((tag) => Array.isArray(tag) && tag[0] === "nonce")
-    : undefined;
-  const claimedTarget = Number.parseInt(nonceTag?.[2] || "", 10);
-
-  if (!nonceTag || Number.isNaN(claimedTarget)) {
-    return { ok: false, reason: "missing nonce tag", pow };
-  }
-
-  if (claimedTarget < requiredPow) {
-    return {
-      ok: false,
-      reason: `nonce target ${claimedTarget} is below ${requiredPow}`,
-      pow,
-    };
-  }
-
-  if (pow < requiredPow) {
-    return { ok: false, reason: `proof ${pow} is below ${requiredPow}`, pow };
-  }
-
-  return { ok: true, reason: "", pow };
-}
-
-function safeJsonParse(raw) {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-function sendOk(ws, eventId, ok, reason) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(["OK", eventId || "", ok, reason]));
-  }
-}
-
-function summarizeEvent(event, pow) {
-  return {
-    id: event.id,
-    kind: event.kind,
-    pow,
-    created_at: event.created_at,
-  };
-}
-
-function setCorsHeaders(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Authorization, Content-Type, X-Admin-Token",
-  );
-}
-
-function setSecurityHeaders(res) {
-  for (const [header, value] of Object.entries(securityHeaders)) {
-    res.setHeader(header, value);
-  }
-}
-
-function isCronAuthorized(req) {
-  const cronSecret = process.env.CRON_SECRET;
-  if (!cronSecret) return true;
-  return req.headers.authorization === `Bearer ${cronSecret}`;
-}
-
-function adminBearerToken(req) {
-  const value = req.headers.authorization;
-  if (!value?.startsWith("Bearer ")) return null;
-  return value.slice("Bearer ".length).trim();
-}
-
-function isLocalRequest(req) {
-  const remote = req.socket.remoteAddress || "";
-  return remote === "127.0.0.1" || remote === "::1" || remote.startsWith("::ffff:127.");
-}
-
-function isAdminAuthorized(req) {
-  if (isPublicHost(req)) return false;
-  if (process.env.MODERATION_ADMIN_OPEN === "true") return true;
-
-  const token = process.env.MODERATION_ADMIN_TOKEN;
-  if (!token) return isLocalRequest(req) || process.env.NODE_ENV !== "production";
-  return adminBearerToken(req) === token || req.headers["x-admin-token"] === token;
-}
-
-function normalizeUrl(value) {
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
-    return parsed.href;
-  } catch {
-    return "";
-  }
-}
-
-function normalizeModerationValue(kind, value) {
-  const trimmed = String(value || "").trim();
-  if (!trimmed) return null;
-
-  if (kind === "block_domain") {
-    return (
-      trimmed
-        .replace(/^https?:\/\//i, "")
-        .replace(/^www\./i, "")
-        .split("/")[0]
-        .trim()
-        .toLowerCase() || null
-    );
-  }
-
-  if (kind === "block_media_url") {
-    return normalizeUrl(trimmed);
-  }
-
-  if (kind === "block_content_fingerprint") {
-    return trimmed.startsWith("fnv1a:") ? trimmed : contentFingerprint(trimmed);
-  }
-
-  return trimmed.toLowerCase();
-}
-
-function uniqueSorted(values) {
-  return [...new Set([...values].filter(Boolean))].sort();
-}
-
-const emptyModerationManifest = {
-  updatedAt: 0,
-  blockedEventIds: [],
-  blockedThreadRoots: [],
-  blockedMediaUrls: [],
-  blockedDomains: [],
-  blockedContentFingerprints: [],
-};
-
-async function readModerationStore() {
-  try {
-    const parsed = JSON.parse(await readFile(moderationStoreFile, "utf8"));
-    if (parsed?.version === 1 && Array.isArray(parsed.actions)) return parsed;
-  } catch {
-    // Missing or malformed stores are treated as empty.
-  }
-  return { version: 1, actions: [] };
-}
-
-async function writeModerationStore(data) {
-  await mkdir(path.dirname(moderationStoreFile), { recursive: true });
-  const temp = `${moderationStoreFile}.${process.pid}.tmp`;
-  await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-  await rename(temp, moderationStoreFile);
-}
-
-async function getModerationActions() {
-  const store = await readModerationStore();
-  return [...store.actions].sort((a, b) => b.createdAt - a.createdAt);
-}
-
-function manifestFromActions(actions) {
-  if (actions.length === 0) return emptyModerationManifest;
-
-  const blockedEventIds = new Set();
-  const blockedThreadRoots = new Set();
-  const blockedMediaUrls = new Set();
-  const blockedDomains = new Set();
-  const blockedContentFingerprints = new Set();
-
-  for (const action of actions) {
-    const normalized = normalizeModerationValue(action.kind, action.value);
-    if (!normalized) continue;
-    if (action.kind === "block_event") blockedEventIds.add(normalized);
-    if (action.kind === "block_thread") {
-      blockedEventIds.add(normalized);
-      blockedThreadRoots.add(normalized);
-    }
-    if (action.kind === "block_media_url") blockedMediaUrls.add(normalized);
-    if (action.kind === "block_domain") blockedDomains.add(normalized);
-    if (action.kind === "block_content_fingerprint") {
-      blockedContentFingerprints.add(normalized);
-    }
-  }
-
-  return {
-    updatedAt: actions.reduce((latest, action) => Math.max(latest, action.createdAt), 0),
-    blockedEventIds: uniqueSorted(blockedEventIds),
-    blockedThreadRoots: uniqueSorted(blockedThreadRoots),
-    blockedMediaUrls: uniqueSorted(blockedMediaUrls),
-    blockedDomains: uniqueSorted(blockedDomains),
-    blockedContentFingerprints: uniqueSorted(blockedContentFingerprints),
-  };
-}
-
-async function getModerationManifest() {
-  return manifestFromActions((await readModerationStore()).actions);
-}
-
-async function createModerationAction(input) {
-  const actionKinds = new Set([
-    "block_event",
-    "block_thread",
-    "block_media_url",
-    "block_domain",
-    "block_content_fingerprint",
-  ]);
-  const reasons = new Set(["illegal", "spam", "abuse", "manual"]);
-
-  if (!actionKinds.has(input.kind)) throw new Error("invalid action kind");
-  if (!reasons.has(input.reason)) throw new Error("invalid reason");
-
-  const normalizedValue = normalizeModerationValue(input.kind, input.value);
-  if (!normalizedValue) throw new Error("invalid moderation value");
-
-  const store = await readModerationStore();
-  const action = {
-    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
-    kind: input.kind,
-    value: normalizedValue,
-    reason: input.reason,
-    note: input.note?.trim() || undefined,
-    createdAt: Date.now(),
-    moderator: input.moderator?.trim() || "local-admin",
-  };
-  store.actions.push(action);
-  await writeModerationStore(store);
-  return action;
-}
-
-async function deleteModerationAction(id) {
-  const store = await readModerationStore();
-  const index = store.actions.findIndex((action) => action.id === id);
-  if (index === -1) throw new Error("moderation action not found");
-
-  const [action] = store.actions.splice(index, 1);
-  await writeModerationStore(store);
-  return action;
-}
+const handleClientConnection = createRelayGateway({
+  backendUrl,
+  minPow,
+  stats,
+  addRecent,
+});
 
 function utcDayKey(timeMs = Date.now()) {
   return new Date(timeMs).toISOString().slice(0, 10);
@@ -658,7 +319,7 @@ function hasDisallowedConfessContent(content) {
 }
 
 function validateConfessAdmission(event, requiredPow, confessPubkey) {
-  const result = verifyPow(event, requiredPow);
+  const result = verifyEventPow(event, requiredPow);
   if (!result.ok) return result;
 
   if (event.pubkey !== confessPubkey) {
@@ -702,20 +363,12 @@ function buildConfessionEvent(admissionEvent, secretKey) {
   );
 }
 
-function withTimeout(promise, timeoutMs, label) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
 async function publishConfessionEvent(event) {
   const results = await Promise.allSettled(
     confessRelays.map(async (url) => {
-      const relay = await withTimeout(Relay.connect(url), confessPublishTimeoutMs, url);
+      const relay = await withPromiseTimeout(Relay.connect(url), confessPublishTimeoutMs, url);
       try {
-        await withTimeout(relay.publish(event), confessPublishTimeoutMs, url);
+        await withPromiseTimeout(relay.publish(event), confessPublishTimeoutMs, url);
         return normalizeRelayUrl(relay.url || url);
       } finally {
         try {
@@ -727,7 +380,7 @@ async function publishConfessionEvent(event) {
     }),
   );
 
-  return uniqueSorted(
+  return uniqueSortedValues(
     results
       .filter((result) => result.status === "fulfilled")
       .map((result) => result.value),
@@ -735,22 +388,15 @@ async function publishConfessionEvent(event) {
 }
 
 function confessXConfigured() {
-  return Boolean(confessXConfig.dryRun || confessXOAuth1Configured());
+  return Boolean(confessXConfig.dryRun || confessXClient.configured());
 }
 
 function confessXOAuth1Configured() {
-  return Boolean(
-    confessXConfig.oauth1ApiKey &&
-      confessXConfig.oauth1ApiSecret &&
-      confessXConfig.oauth1AccessToken &&
-      confessXConfig.oauth1AccessSecret,
-  );
+  return confessXClient.configured();
 }
 
 function confessXAuthMode() {
-  if (confessXOAuth1Configured()) return "oauth1";
-  if (confessXConfig.dryRun) return "dry_run";
-  return "none";
+  return confessXClient.authMode();
 }
 
 function normalizeConfessXText(content) {
@@ -783,316 +429,23 @@ function buildConfessXTweetText() {
   return "";
 }
 
-function escapeXml(value) {
-  return String(value || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function normalizeSvgText(value) {
-  return String(value || "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function wrapSvgText(value, maxCharacters, maxLines) {
-  const paragraphs = normalizeSvgText(value).split("\n");
-  const lines = [];
-  let truncated = false;
-
-  for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
-    const paragraph = paragraphs[paragraphIndex];
-    if (lines.length >= maxLines) {
-      truncated = true;
-      break;
-    }
-    if (!paragraph.trim()) {
-      if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
-      continue;
-    }
-
-    let line = "";
-    for (const word of paragraph.trim().split(/\s+/)) {
-      const nextLine = line ? `${line} ${word}` : word;
-      if (nextLine.length <= maxCharacters) {
-        line = nextLine;
-        continue;
-      }
-
-      if (line) lines.push(line);
-      line = word;
-
-      while (line.length > maxCharacters) {
-        if (lines.length >= maxLines) {
-          truncated = true;
-          break;
-        }
-        lines.push(line.slice(0, maxCharacters));
-        line = line.slice(maxCharacters);
-      }
-
-      if (lines.length >= maxLines) {
-        truncated = true;
-        break;
-      }
-    }
-
-    if (line && lines.length < maxLines) lines.push(line);
-    if (paragraphIndex < paragraphs.length - 1 && lines.length >= maxLines) {
-      truncated = true;
-      break;
-    }
-  }
-
-  const limited = lines.slice(0, maxLines);
-  if (limited.length === 0) limited.push("");
-  if (truncated && limited.length > 0) {
-    limited[limited.length - 1] = `${limited[limited.length - 1].replace(/\s+$/, "")}...`;
-  }
-  return limited;
-}
-
-function avatarCellsForPubkey(pubkey) {
-  const digest = crypto.createHash("sha256").update(String(pubkey || "")).digest();
-  return Array.from({ length: 16 }, (_, index) => (digest[index] & 1) === 1);
-}
-
-function truncateSvgLabel(value, maxLength) {
-  const label = String(value || "").replace(/\s+/g, " ").trim();
-  if (label.length <= maxLength) return label;
-  return `${label.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
-}
-
-function confessProfileDisplayName(profile, pubkey) {
-  if (profile?.displayName) return profile.displayName;
-  if (profile?.name) return profile.name;
-  try {
-    return truncateSvgLabel(nip19.npubEncode(pubkey), 18);
-  } catch {
-    return "wired confess";
-  }
-}
-
-function safeProfileImageMarkup({ imageDataUri, cells, cardX, headerY, scale }) {
-  const avatarX = cardX + Math.round(42 * scale);
-  const avatarY = headerY - Math.round(24 * scale);
-  const avatarSize = Math.round(48 * scale);
-  const avatarRadius = Math.round(avatarSize / 2);
-  const avatarCenterX = avatarX + avatarRadius;
-  const avatarCenterY = avatarY + avatarRadius;
-
-  if (imageDataUri) {
-    return `
-  <clipPath id="profile-avatar-clip">
-    <circle cx="${avatarCenterX}" cy="${avatarCenterY}" r="${avatarRadius}" />
-  </clipPath>
-  <image href="${escapeXml(imageDataUri)}" x="${avatarX}" y="${avatarY}" width="${avatarSize}" height="${avatarSize}" preserveAspectRatio="xMidYMid slice" clip-path="url(#profile-avatar-clip)" />
-  <circle cx="${avatarCenterX}" cy="${avatarCenterY}" r="${avatarRadius}" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="${Math.max(1, Math.round(1 * scale))}" />`;
-  }
-
-  return cells;
-}
-
-function confessPostcardSvg({ text, eventId, pubkey, profile, profileImageDataUri }) {
-  const width = confessXImageWidth;
-  const height = confessXImageHeight;
-  const scale = width / 1200;
-  const outer = Math.round(78 * scale);
-  const cardX = Math.round(128 * scale);
-  const cardY = Math.round(104 * scale);
-  const cardWidth = width - cardX * 2;
-  const cardHeight = height - cardY * 2;
-  const headerY = cardY + Math.round(50 * scale);
-  const bodyX = cardX + Math.round(42 * scale);
-  const bodyY = cardY + Math.round(150 * scale);
-  const fontSize = Math.max(24, Math.round(36 * scale));
-  const lineHeight = Math.round(fontSize * 1.55);
-  const maxBodyWidth = cardWidth - Math.round(84 * scale);
-  const maxCharacters = Math.max(18, Math.floor(maxBodyWidth / (fontSize * 0.62)));
-  const maxLines = Math.max(3, Math.floor((cardHeight - Math.round(290 * scale)) / lineHeight));
-  const lines = wrapSvgText(text, maxCharacters, maxLines);
-  const bodyTspans = lines
-    .map((line, index) => {
-      const dy = index === 0 ? 0 : line === "" ? lineHeight * 0.72 : lineHeight;
-      return `<tspan x="${bodyX}" dy="${index === 0 ? 0 : dy}">${escapeXml(line)}</tspan>`;
-    })
-    .join("");
-  const signal = Math.max(0, countLeadingZeroBits(String(eventId || "")));
-  const shortEvent = String(eventId || "").slice(0, 12);
-  const cells = avatarCellsForPubkey(pubkey)
-    .map((filled, index) => {
-      if (!filled) return "";
-      const cell = Math.round(8 * scale);
-      const gap = Math.round(2 * scale);
-      const x = cardX + Math.round(42 * scale) + (index % 4) * (cell + gap);
-      const y = headerY - Math.round(12 * scale) + Math.floor(index / 4) * (cell + gap);
-      return `<rect x="${x}" y="${y}" width="${cell}" height="${cell}" fill="#5eead4" opacity="0.55" />`;
-    })
-    .join("");
-  const labelX = cardX + Math.round(92 * scale);
-  const labelY = headerY + Math.round(11 * scale);
-  const metaY = cardY + cardHeight - Math.round(54 * scale);
-  const profileName = truncateSvgLabel(confessProfileDisplayName(profile, pubkey), 36);
-  const profileAvatar = safeProfileImageMarkup({
-    imageDataUri: profileImageDataUri,
-    cells,
-    cardX,
-    headerY,
-    scale,
-  });
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <filter id="signal-glow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="${Math.max(2, 5 * scale)}" result="blur" />
-      <feMerge>
-        <feMergeNode in="blur" />
-        <feMergeNode in="SourceGraphic" />
-      </feMerge>
-    </filter>
-    <linearGradient id="card-shade" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#111118" />
-      <stop offset="100%" stop-color="#0a0a0f" />
-    </linearGradient>
-  </defs>
-  <rect width="100%" height="100%" fill="#050508" />
-  <rect x="${outer}" y="${Math.round(56 * scale)}" width="${width - outer * 2}" height="${height - Math.round(112 * scale)}" fill="#0a0a0f" opacity="0.72" />
-  <rect x="${cardX}" y="${cardY}" width="${cardWidth}" height="${cardHeight}" rx="${Math.round(10 * scale)}" fill="url(#card-shade)" stroke="rgba(255,255,255,0.08)" />
-  <line x1="${cardX}" y1="${cardY + cardHeight - Math.round(96 * scale)}" x2="${cardX + cardWidth}" y2="${cardY + cardHeight - Math.round(96 * scale)}" stroke="rgba(255,255,255,0.06)" />
-  ${profileAvatar}
-  <text x="${labelX}" y="${labelY}" fill="#8a8a96" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(22 * scale)}" letter-spacing="${0.4 * scale}">
-    ${escapeXml(profileName)}
-  </text>
-  <text x="${bodyX}" y="${bodyY}" fill="#e8e8ec" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${fontSize}" line-height="${lineHeight}">
-    ${bodyTspans}
-  </text>
-  <g font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(19 * scale)}" fill="#8a8a96">
-    <text x="${bodyX}" y="${metaY}" fill="#5eead4" filter="url(#signal-glow)">signal ${signal}</text>
-    <text x="${bodyX + Math.round(150 * scale)}" y="${metaY}">now</text>
-  </g>
-  <text x="${bodyX}" y="${cardY + cardHeight - Math.round(22 * scale)}" fill="#4a4a56" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(15 * scale)}">
-    ${escapeXml(shortEvent)} / wiredsignal.online
-  </text>
-</svg>`;
-}
-
-function isPrivateIpv4(hostname) {
-  const parts = hostname.split(".").map((part) => Number(part));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-    return false;
-  }
-
-  const [first, second] = parts;
-  return (
-    first === 10 ||
-    first === 127 ||
-    (first === 169 && second === 254) ||
-    (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && second === 168)
-  );
-}
-
-function isSafeProfileImageUrl(value) {
-  try {
-    const parsed = new URL(value);
-    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    if (parsed.protocol !== "https:") return false;
-    if (!hostname || hostname === "localhost" || hostname.endsWith(".local")) return false;
-    if (net.isIPv4(hostname) && isPrivateIpv4(hostname)) return false;
-    if (net.isIPv6(hostname) && (hostname === "::1" || hostname.startsWith("fc") || hostname.startsWith("fd"))) {
-      return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function fetchConfessXProfileImageDataUri(url) {
-  if (!url || !isSafeProfileImageUrl(url)) return null;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), confessXProfileImageTimeoutMs);
-  try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: "image/*" },
-    });
-    if (!response.ok) return null;
-
-    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-    if (contentType && !contentType.startsWith("image/")) return null;
-
-    const contentLength = Number(response.headers.get("content-length") || 0);
-    if (contentLength > confessXProfileImageMaxBytes) return null;
-
-    const arrayBuffer = await response.arrayBuffer();
-    if (arrayBuffer.byteLength > confessXProfileImageMaxBytes) return null;
-
-    const png = await sharp(Buffer.from(arrayBuffer), {
-      limitInputPixels: 4096 * 4096,
-    })
-      .resize(128, 128, { fit: "cover" })
-      .png({ compressionLevel: 9, adaptiveFiltering: true })
-      .toBuffer();
-    return `data:image/png;base64,${png.toString("base64")}`;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function resolveConfessXProfile(pubkey) {
-  if (!/^[0-9a-f]{64}$/i.test(String(pubkey || ""))) {
-    return { profile: null, imageDataUri: null };
-  }
-
-  try {
-    const profiles = await fetchProfileMetadata([pubkey]);
-    const profile = profiles[pubkey] || null;
-    const imageDataUri = await fetchConfessXProfileImageDataUri(profile?.picture);
-    return { profile, imageDataUri };
-  } catch {
-    return { profile: null, imageDataUri: null };
-  }
-}
+let confessPostcardRenderer = null;
 
 async function renderConfessXImage({ text, eventId, pubkey }) {
-  const { profile, imageDataUri } = await resolveConfessXProfile(pubkey);
-  const svg = confessPostcardSvg({
-    text,
-    eventId,
-    pubkey,
-    profile,
-    profileImageDataUri: imageDataUri,
+  confessPostcardRenderer ??= createConfessPostcardRenderer({
+    image: {
+      width: confessXImageWidth,
+      height: confessXImageHeight,
+      maxBytes: confessXImageMaxBytes,
+      template: confessXImageTemplate,
+    },
+    profileImage: {
+      timeoutMs: confessXProfileImageTimeoutMs,
+      maxBytes: confessXProfileImageMaxBytes,
+    },
+    fetchProfileMetadata: feedSnapshot.fetchProfileMetadata,
   });
-  const buffer = await sharp(Buffer.from(svg), {
-    limitInputPixels: confessXImageWidth * confessXImageHeight * 2,
-  })
-    .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .toBuffer();
-  const imageHash = crypto.createHash("sha256").update(buffer).digest("hex");
-  if (buffer.byteLength > confessXImageMaxBytes) {
-    const error = new Error(`generated X image exceeds ${confessXImageMaxBytes} bytes`);
-    error.imageHash = imageHash;
-    error.imageBytes = buffer.byteLength;
-    throw error;
-  }
-  return {
-    buffer,
-    imageHash,
-    imageBytes: buffer.byteLength,
-    width: confessXImageWidth,
-    height: confessXImageHeight,
-    template: confessXImageTemplate,
-  };
+  return confessPostcardRenderer.render({ text, eventId, pubkey });
 }
 
 const xMentionPattern = /(^|[^a-z0-9_])@[a-z0-9_]{1,15}\b/i;
@@ -1208,29 +561,6 @@ function initialConfessXMirror(event, store) {
   };
 }
 
-async function readJsonResponse(response) {
-  const text = await response.text();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text.slice(0, 500) };
-  }
-}
-
-function summarizeXError(payload) {
-  if (!payload) return "empty response";
-  if (typeof payload.detail === "string") return payload.detail;
-  if (typeof payload.title === "string") return payload.title;
-  if (Array.isArray(payload.errors) && payload.errors.length > 0) {
-    return payload.errors
-      .map((error) => error.detail || error.message || error.title || String(error))
-      .join("; ")
-      .slice(0, 300);
-  }
-  return JSON.stringify(payload).slice(0, 300);
-}
-
 function nextConfessXAttemptAt(attempts) {
   const delay = confessXRetrySeconds * 1000 * 2 ** Math.max(0, attempts - 1);
   return Date.now() + Math.min(delay, 24 * 60 * 60 * 1000);
@@ -1322,10 +652,10 @@ async function postConfessXText(text, existingMirror, eventId) {
         imageHeight: rendered.height,
         imageTemplate: rendered.template,
       };
-      const uploadResponse = await uploadConfessXImage(rendered.buffer);
-      const uploadPayload = await readJsonResponse(uploadResponse);
+      const uploadResponse = await confessXClient.uploadImage(rendered.buffer);
+      const uploadPayload = await readHttpJsonResponse(uploadResponse);
       if (!uploadResponse.ok || !uploadPayload?.data?.id) {
-        const reason = `X media upload failed (${uploadResponse.status}): ${summarizeXError(uploadPayload)}`;
+        const reason = `X media upload failed (${uploadResponse.status}): ${summarizeHttpError(uploadPayload)}`;
         const retryable = uploadResponse.status === 429 || uploadResponse.status >= 500;
         return failedConfessXMirror(existingMirror, reason, retryable, imagePatch);
       }
@@ -1346,15 +676,13 @@ async function postConfessXText(text, existingMirror, eventId) {
   let tweetId = existingMirror?.tweetId || null;
   let postedAt = existingMirror?.postedAt || null;
   if (!tweetId) {
-    const response = await postConfessXOAuth1Request(
-      buildConfessXTweetText(),
-      {
-        mediaIds: mediaId ? [mediaId] : [],
-      },
-    );
-    const payload = await readJsonResponse(response);
+    const response = await confessXClient.postTweet({
+      text: buildConfessXTweetText(),
+      mediaIds: mediaId ? [mediaId] : [],
+    });
+    const payload = await readHttpJsonResponse(response);
     if (!response.ok || !payload?.data?.id) {
-      const reason = `X post failed (${response.status}): ${summarizeXError(payload)}`;
+      const reason = `X post failed (${response.status}): ${summarizeHttpError(payload)}`;
       const retryable = response.status === 429 || response.status >= 500;
       return failedConfessXMirror(existingMirror, reason, retryable, imagePatch);
     }
@@ -1363,10 +691,11 @@ async function postConfessXText(text, existingMirror, eventId) {
   }
 
   const threadReplyText = buildConfessXThreadReplyText(eventId, existingMirror?.pubkey);
-  const replyResponse = await postConfessXOAuth1Request(threadReplyText, {
+  const replyResponse = await confessXClient.postTweet({
+    text: threadReplyText,
     inReplyToTweetId: tweetId,
   });
-  const replyPayload = await readJsonResponse(replyResponse);
+  const replyPayload = await readHttpJsonResponse(replyResponse);
   if (replyResponse.ok && replyPayload?.data?.id) {
     return {
       ...existingMirror,
@@ -1387,7 +716,7 @@ async function postConfessXText(text, existingMirror, eventId) {
     };
   }
 
-  const reason = `X thread reply failed (${replyResponse.status}): ${summarizeXError(replyPayload)}`;
+  const reason = `X thread reply failed (${replyResponse.status}): ${summarizeHttpError(replyPayload)}`;
   const retryable = replyResponse.status === 429 || replyResponse.status >= 500;
   return failedConfessXMirror(existingMirror, reason, retryable, {
     ...imagePatch,
@@ -1397,106 +726,6 @@ async function postConfessXText(text, existingMirror, eventId) {
     threadUrl: confessXThreadUrl(eventId, existingMirror?.pubkey),
     postedAt,
   });
-}
-
-function oauthPercentEncode(value) {
-  return encodeURIComponent(String(value))
-    .replace(/[!'()*]/g, (character) =>
-      `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
-    );
-}
-
-function oauthNonce() {
-  return crypto.randomBytes(16).toString("base64url");
-}
-
-function oauth1AuthorizationHeader(method, url) {
-  const oauthParams = {
-    oauth_consumer_key: confessXConfig.oauth1ApiKey,
-    oauth_nonce: oauthNonce(),
-    oauth_signature_method: "HMAC-SHA1",
-    oauth_timestamp: String(Math.floor(Date.now() / 1000)),
-    oauth_token: confessXConfig.oauth1AccessToken,
-    oauth_version: "1.0",
-  };
-
-  const parsedUrl = new URL(url);
-  const signatureParams = [
-    ...Object.entries(oauthParams),
-    ...[...parsedUrl.searchParams.entries()],
-  ].sort(([leftKey, leftValue], [rightKey, rightValue]) => {
-    if (leftKey === rightKey) return leftValue.localeCompare(rightValue);
-    return leftKey.localeCompare(rightKey);
-  });
-  const parameterString = signatureParams
-    .map(([key, value]) => `${oauthPercentEncode(key)}=${oauthPercentEncode(value)}`)
-    .join("&");
-  const normalizedUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
-  const signatureBase = [
-    method.toUpperCase(),
-    oauthPercentEncode(normalizedUrl),
-    oauthPercentEncode(parameterString),
-  ].join("&");
-  const signingKey = `${oauthPercentEncode(confessXConfig.oauth1ApiSecret)}&${oauthPercentEncode(
-    confessXConfig.oauth1AccessSecret,
-  )}`;
-  const signature = crypto
-    .createHmac("sha1", signingKey)
-    .update(signatureBase)
-    .digest("base64");
-
-  return `OAuth ${Object.entries({ ...oauthParams, oauth_signature: signature })
-    .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
-    .map(([key, value]) => `${oauthPercentEncode(key)}="${oauthPercentEncode(value)}"`)
-    .join(", ")}`;
-}
-
-async function postConfessXOAuth1Request(
-  text,
-  { inReplyToTweetId = null, mediaIds = [] } = {},
-) {
-  const url = "https://api.x.com/2/tweets";
-  const body = {};
-  const trimmedText = String(text || "").trim();
-  if (trimmedText) body.text = trimmedText;
-  if (inReplyToTweetId) {
-    body.reply = { in_reply_to_tweet_id: inReplyToTweetId };
-  }
-  if (mediaIds.length > 0) {
-    body.media = { media_ids: mediaIds };
-  }
-  return withTimeout(
-    fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: oauth1AuthorizationHeader("POST", url),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    }),
-    confessXPostTimeoutMs,
-    "X post",
-  );
-}
-
-async function uploadConfessXImage(buffer) {
-  const url = "https://api.x.com/2/media/upload";
-  const form = new FormData();
-  form.append("media_category", "tweet_image");
-  form.append("media_type", "image/png");
-  form.append("media", new Blob([buffer], { type: "image/png" }), "wired-confess.png");
-
-  return withTimeout(
-    fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: oauth1AuthorizationHeader("POST", url),
-      },
-      body: form,
-    }),
-    confessXPostTimeoutMs,
-    "X media upload",
-  );
 }
 
 async function updateConfessXMirror(eventId, updater) {
@@ -1684,1046 +913,41 @@ async function createConfession(admissionEvent) {
   };
 }
 
-const httpUrlPattern = /https?:\/\/[^\s<>"')\]]+/gi;
-const mediaExtensionPattern =
-  /\.(?:jpe?g|png|gif|webp|mp4|webm|mov|mp3|wav|ogg|m4a)(?:\?|$)/i;
-
-function imetaUrls(event) {
-  return (event.tags || [])
-    .filter((tag) => tag[0] === "imeta")
-    .flatMap((tag) =>
-      tag
-        .slice(1)
-        .filter((part) => part.startsWith("url "))
-        .map((part) => part.slice("url ".length).trim()),
-    );
-}
-
-function eventUrls(event) {
-  const contentUrls = [...String(event.content || "").matchAll(httpUrlPattern)].map(
-    (match) => match[0],
-  );
-  return uniqueSorted([...contentUrls, ...imetaUrls(event)].map(normalizeUrl));
-}
-
-function domainFromUrl(value) {
-  const normalized = normalizeUrl(value);
-  if (!normalized) return null;
-  try {
-    return new URL(normalized).hostname.toLowerCase().replace(/^www\./, "");
-  } catch {
-    return null;
-  }
-}
-
-function mediaUrlsFromEvent(event) {
-  return uniqueSorted(eventUrls(event).filter((url) => mediaExtensionPattern.test(url)));
-}
-
-function parsedRepostEvent(event) {
-  if (event.kind !== 6) return null;
-  try {
-    const parsed = JSON.parse(event.content);
-    if (
-      typeof parsed.id !== "string" ||
-      typeof parsed.pubkey !== "string" ||
-      typeof parsed.content !== "string" ||
-      !Array.isArray(parsed.tags) ||
-      typeof parsed.created_at !== "number" ||
-      typeof parsed.kind !== "number" ||
-      typeof parsed.sig !== "string"
-    ) {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function visibleEventVariants(event) {
-  const repost = parsedRepostEvent(event);
-  return repost ? [event, repost] : [event];
-}
-
-function rootReferences(event) {
-  return (event.tags || []).filter((tag) => tag[0] === "e" && tag[1]).map((tag) => tag[1]);
-}
-
-function normalizeContentForFingerprint(content) {
-  return String(content || "")
-    .replace(httpUrlPattern, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function contentFingerprint(content) {
-  const normalized = normalizeContentForFingerprint(content);
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < normalized.length; index += 1) {
-    hash ^= normalized.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `fnv1a:${(hash >>> 0).toString(16).padStart(8, "0")}`;
-}
-
-function isEventModerated(event, manifest) {
-  const variants = visibleEventVariants(event);
-  const blockedEventIds = new Set(manifest.blockedEventIds);
-  if (variants.some((variant) => blockedEventIds.has(variant.id.toLowerCase()))) {
-    return true;
-  }
-
-  const blockedThreadRoots = new Set(manifest.blockedThreadRoots);
-  if (
-    variants.some((variant) =>
-      rootReferences(variant).some((id) => blockedThreadRoots.has(id.toLowerCase())),
-    )
-  ) {
-    return true;
-  }
-
-  const blockedMediaUrls = new Set(manifest.blockedMediaUrls);
-  if (
-    variants.some((variant) =>
-      mediaUrlsFromEvent(variant).some((url) => blockedMediaUrls.has(url)),
-    )
-  ) {
-    return true;
-  }
-
-  const blockedDomains = new Set(manifest.blockedDomains);
-  if (
-    variants.some((variant) =>
-      eventUrls(variant)
-        .map(domainFromUrl)
-        .some((domain) => domain && blockedDomains.has(domain)),
-    )
-  ) {
-    return true;
-  }
-
-  const blockedContentFingerprints = new Set(manifest.blockedContentFingerprints);
-  return variants.some((variant) =>
-    blockedContentFingerprints.has(contentFingerprint(variant.content)),
-  );
-}
-
-function isRootNote(event) {
-  return event.kind === 1 && !(event.tags || []).some((tag) => tag[0] === "e");
-}
-
-function sinceFromAgeHours(ageHours) {
-  return Math.floor(Date.now() / 1000) - ageHours * 60 * 60;
-}
-
-function normalizeRelayUrl(url) {
-  return url.replace(/\/+$/, "");
-}
-
-function uniqueRelays(relays) {
-  return [...new Set(relays.map(normalizeRelayUrl).filter(Boolean))];
-}
-
-function addRelayHint(relayHintsByEventId, eventId, relayUrl) {
-  const normalizedRelay = normalizeRelayUrl(relayUrl);
-  const existing = relayHintsByEventId.get(eventId) || [];
-  if (existing.includes(normalizedRelay)) return;
-
-  relayHintsByEventId.set(eventId, [...existing, normalizedRelay]);
-}
-
-function mergeRelayHints(...hintGroups) {
-  const merged = new Map();
-
-  hintGroups.forEach((relayHintsByEventId) => {
-    relayHintsByEventId.forEach((relays, eventId) => {
-      relays.forEach((relay) => addRelayHint(merged, eventId, relay));
-    });
-  });
-
-  return merged;
-}
-
-function mergeEvents(...eventGroups) {
-  const merged = new Map();
-  eventGroups.forEach((events) => {
-    events.forEach((event) => merged.set(event.id, event));
-  });
-  return [...merged.values()];
-}
-
-function serializeRelayHints(relayHintsByEventId) {
-  return Object.fromEntries(
-    [...relayHintsByEventId.entries()].map(([eventId, relays]) => [
-      eventId,
-      uniqueRelays(relays),
-    ]),
-  );
-}
-
-const eventIdPattern = /^[0-9a-f]{64}$/i;
-const nostrRefPattern = /nostr:(?:note|nevent|naddr|npub|nprofile|nrelay)1[a-z0-9]+/gi;
-
-function decodeNostrEventRef(ref) {
-  const bech32 = String(ref || "").replace(/^nostr:/i, "");
-  try {
-    const decoded = nip19.decode(bech32);
-    if (decoded.type === "note") {
-      return { id: decoded.data, relays: [] };
-    }
-    if (decoded.type === "nevent") {
-      return {
-        id: decoded.data.id,
-        relays: uniqueRelays(decoded.data.relays || []),
-      };
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-function addReferencedEventRef(refsById, id, relays = []) {
-  if (!eventIdPattern.test(id)) return;
-
-  const normalizedId = id.toLowerCase();
-  const existing = refsById.get(normalizedId);
-  if (existing) {
-    existing.relays = uniqueRelays([...existing.relays, ...relays]);
-    return;
-  }
-  refsById.set(normalizedId, { id: normalizedId, relays: uniqueRelays(relays) });
-}
-
-function extractMentionedEventRefs(event) {
-  const refsById = new Map();
-
-  for (const tag of event.tags || []) {
-    if ((tag[0] === "q" || tag[0] === "e") && tag[1]) {
-      const relayHint = tag[2] ? normalizeRelayUrl(tag[2]) : undefined;
-
-      if (eventIdPattern.test(tag[1])) {
-        addReferencedEventRef(refsById, tag[1], relayHint ? [relayHint] : []);
-        continue;
-      }
-
-      const decoded = decodeNostrEventRef(tag[1]);
-      if (decoded) {
-        addReferencedEventRef(
-          refsById,
-          decoded.id,
-          relayHint ? [...decoded.relays, relayHint] : decoded.relays,
-        );
-      }
-    }
-  }
-
-  for (const match of String(event.content || "").matchAll(nostrRefPattern)) {
-    const decoded = decodeNostrEventRef(match[0]);
-    if (decoded) addReferencedEventRef(refsById, decoded.id, decoded.relays);
-  }
-
-  return [...refsById.values()];
-}
-
-async function connectRelays(urls) {
-  const relays = await Promise.all(
-    urls.map(async (url) => {
-      try {
-        return await Relay.connect(url);
-      } catch {
-        return null;
-      }
-    }),
-  );
-  return relays.filter(Boolean);
-}
-
-function closeRelays(relays) {
-  relays.forEach((relay) => {
-    try {
-      relay.close();
-    } catch {
-      // Relay already closed.
-    }
-  });
-}
-
-async function subscribeOnce(relays, filter, relayUrls) {
-  const targetRelays = relayUrls
-    ? relays.filter((relay) =>
-        relayUrls.some((url) => normalizeRelayUrl(url) === normalizeRelayUrl(relay.url)),
-      )
-    : relays;
-
-  if (targetRelays.length === 0) {
-    return { events: [], relayHintsByEventId: new Map() };
-  }
-
-  const events = [];
-  const seenIds = new Set();
-  const relayHintsByEventId = new Map();
-
-  await new Promise((resolve) => {
-    const subscriptions = [];
-    let eoseCount = 0;
-    let settled = false;
-
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      subscriptions.forEach((sub) => {
-        try {
-          sub.close();
-        } catch {
-          // Subscription already closed.
-        }
-      });
-      resolve();
-    };
-
-    const timer = setTimeout(finish, snapshotTimeoutMs);
-
-    for (const relay of targetRelays) {
-      try {
-        const sub = relay.subscribe([filter], {
-          onevent(event) {
-            addRelayHint(relayHintsByEventId, event.id, relay.url);
-            if (!seenIds.has(event.id)) {
-              seenIds.add(event.id);
-              events.push(event);
-            }
-          },
-          oneose() {
-            eoseCount += 1;
-            if (eoseCount >= targetRelays.length) finish();
-          },
-        });
-        subscriptions.push(sub);
-      } catch {
-        eoseCount += 1;
-        if (eoseCount >= targetRelays.length) finish();
-      }
-    }
-  });
-
-  return { events, relayHintsByEventId };
-}
-
-function buildReplyFilter(parentIds, since) {
-  const ids = parentIds.slice(0, 50);
-  if (ids.length === 0) return null;
-  return {
-    "#e": ids,
-    kinds: [1],
-    since,
-    limit: 100,
-  };
-}
-
-async function fetchGlobalFeedEvents() {
-  const relays = await connectRelays(threadRelays);
-  try {
-    const notes = new Set();
-    const since = sinceFromAgeHours(snapshotAgeHours);
-    const rootBatch = await subscribeOnce(
-      relays,
-      { kinds: [1, 1068], since, limit: 500 },
-      powRelays,
-    );
-    const rootEvents = rootBatch.events;
-
-    rootEvents.forEach((event) => {
-      if (isRootNote(event)) notes.add(event.id);
-    });
-
-    const replyEvents = [];
-    const seenReplyIds = new Set();
-    const replyRelayHintsByEventId = new Map();
-    let parentIds = [...notes];
-
-    for (let depth = 0; depth < replyFetchDepth && parentIds.length > 0; depth += 1) {
-      const replyFilter = buildReplyFilter(parentIds, since);
-      if (!replyFilter) break;
-      const replyBatch = await subscribeOnce(relays, replyFilter, threadRelays);
-      const nextReplies = replyBatch.events;
-      replyBatch.relayHintsByEventId.forEach((relays, eventId) => {
-        relays.forEach((relay) => addRelayHint(replyRelayHintsByEventId, eventId, relay));
-      });
-      const nextParentIds = [];
-      nextReplies.forEach((event) => {
-        if (seenReplyIds.has(event.id)) return;
-        seenReplyIds.add(event.id);
-        replyEvents.push(event);
-        nextParentIds.push(event.id);
-      });
-      parentIds = nextParentIds;
-    }
-
-    return {
-      events: [...new Map([...rootEvents, ...replyEvents].map((event) => [event.id, event])).values()],
-      relayHintsByEventId: mergeRelayHints(rootBatch.relayHintsByEventId, replyRelayHintsByEventId),
-    };
-  } finally {
-    closeRelays(relays);
-  }
-}
-
-function buildRepliesByParent(events) {
-  const repliesByParent = new Map();
-  events.forEach((event) => {
-    if (event.kind !== 1) return;
-    (event.tags || []).forEach((tag) => {
-      if (tag[0] !== "e" || !tag[1]) return;
-      const replies = repliesByParent.get(tag[1]) || [];
-      replies.push(event);
-      repliesByParent.set(tag[1], replies);
-    });
-  });
-  return repliesByParent;
-}
-
-function collectThreadReplies(rootId, repliesByParent) {
-  const replies = [];
-  const seen = new Set();
-  const pending = [...(repliesByParent.get(rootId) || [])];
-  while (pending.length > 0) {
-    const reply = pending.shift();
-    if (!reply || seen.has(reply.id)) continue;
-    seen.add(reply.id);
-    replies.push(reply);
-    pending.push(...(repliesByParent.get(reply.id) || []));
-  }
-  return replies;
-}
-
-function eventWork(event) {
-  return Math.pow(2, eventPow(event));
-}
-
-function workScoreBreakdown(event, replies) {
-  let rankingReplyCount = 0;
-  const replyWork = replies.reduce((sum, reply) => {
-    const difficulty = eventPow(reply);
-    if (difficulty < minPow) return sum;
-    rankingReplyCount += 1;
-    return sum + Math.pow(2, difficulty);
-  }, 0);
-  const rootWork = eventWork(event);
-  return {
-    rootWork,
-    replyWork,
-    totalWork: rootWork + replyWork,
-    rankingReplyCount,
-  };
-}
-
-function relayHintsForEvent(eventId, relayHintsByEventId) {
-  const relayHints = relayHintsByEventId?.get(eventId);
-  if (!relayHints) return undefined;
-
-  const normalized = [...new Set(relayHints.map(normalizeRelayUrl).filter(Boolean))];
-  return normalized.length > 0 ? normalized : undefined;
-}
-
-function processFeedEvents(events, relayHintsByEventId = new Map()) {
-  const repliesByParent = buildRepliesByParent(events);
-  const seenPubkeys = new Set();
-  const posts = [];
-
-  events.forEach((event) => {
-    if (event.kind !== 1 && event.kind !== 1068) return;
-    if (seenPubkeys.has(event.pubkey)) return;
-    if (event.kind === 1 && !isRootNote(event)) return;
-    if (eventPow(event) < minPow) return;
-    seenPubkeys.add(event.pubkey);
-    posts.push(event);
-  });
-
-  return posts
-    .map((postEvent) => {
-      const replies = collectThreadReplies(postEvent.id, repliesByParent);
-      return {
-        postEvent,
-        replies,
-        relayHints: relayHintsForEvent(postEvent.id, relayHintsByEventId),
-        threadReplyCount: replies.length,
-        ...workScoreBreakdown(postEvent, replies),
-      };
-    })
-    .sort((a, b) => b.totalWork - a.totalWork || b.postEvent.created_at - a.postEvent.created_at);
-}
-
-function snapshotReferenceRefs(processedEvents) {
-  const byId = new Map();
-
-  processedEvents.forEach((processed) => {
-    extractMentionedEventRefs(processed.postEvent).forEach((ref) => {
-      const existing = byId.get(ref.id);
-      if (existing) {
-        existing.relays = uniqueRelays([...existing.relays, ...ref.relays]);
-        return;
-      }
-      byId.set(ref.id, { id: ref.id, relays: uniqueRelays(ref.relays) });
-    });
-  });
-
-  return [...byId.values()];
-}
-
-async function fetchReferencedEvents(refs, knownEventIds) {
-  const missingRefs = refs.filter((ref) => !knownEventIds.has(ref.id));
-  if (missingRefs.length === 0) {
-    return { events: [], relayHintsByEventId: new Map() };
-  }
-
-  const relayUrls = uniqueRelays([
-    ...threadRelays,
-    ...missingRefs.flatMap((ref) => ref.relays),
-  ]);
-  const relays = await connectRelays(relayUrls);
-
-  try {
-    const referencedBatch = await subscribeOnce(
-      relays,
-      {
-        ids: missingRefs.map((ref) => ref.id),
-        kinds: [1, 1068],
-        limit: missingRefs.length,
-      },
-      relayUrls,
-    );
-
-    const replyEvents = [];
-    const seenReplyIds = new Set();
-    const replyRelayHintsByEventId = new Map();
-    const since = sinceFromAgeHours(snapshotAgeHours);
-    let parentIds = referencedBatch.events.map((event) => event.id);
-
-    for (let depth = 0; depth < replyFetchDepth && parentIds.length > 0; depth += 1) {
-      const replyFilter = buildReplyFilter(parentIds, since);
-      if (!replyFilter) break;
-
-      const replyBatch = await subscribeOnce(relays, replyFilter, relayUrls);
-      const nextParentIds = [];
-
-      replyBatch.relayHintsByEventId.forEach((relays, eventId) => {
-        relays.forEach((relay) => addRelayHint(replyRelayHintsByEventId, eventId, relay));
-      });
-
-      replyBatch.events.forEach((event) => {
-        if (knownEventIds.has(event.id) || seenReplyIds.has(event.id)) return;
-
-        seenReplyIds.add(event.id);
-        replyEvents.push(event);
-        nextParentIds.push(event.id);
-      });
-
-      parentIds = nextParentIds;
-    }
-
-    return {
-      events: mergeEvents(referencedBatch.events, replyEvents),
-      relayHintsByEventId: mergeRelayHints(
-        referencedBatch.relayHintsByEventId,
-        replyRelayHintsByEventId,
-      ),
-    };
-  } finally {
-    closeRelays(relays);
-  }
-}
-
-function parseProfileEvent(event) {
-  if (event.kind !== 0) return null;
-  try {
-    const raw = JSON.parse(event.content);
-    const profile = {
-      name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : undefined,
-      displayName:
-        typeof raw.display_name === "string" && raw.display_name.trim()
-          ? raw.display_name.trim()
-          : typeof raw.displayName === "string" && raw.displayName.trim()
-            ? raw.displayName.trim()
-            : undefined,
-      picture: undefined,
-    };
-    if (typeof raw.picture === "string") {
-      const picture = normalizeUrl(raw.picture.trim());
-      if (picture) profile.picture = picture;
-    }
-    return profile.name || profile.displayName || profile.picture ? profile : null;
-  } catch {
-    return null;
-  }
-}
-
-async function fetchProfileMetadata(pubkeys) {
-  if (pubkeys.length === 0) return {};
-  const relays = await connectRelays(threadRelays);
-  try {
-    const { events } = await subscribeOnce(
-      relays,
-      {
-        authors: pubkeys,
-        kinds: [0],
-        limit: Math.min(pubkeys.length, 250),
-      },
-      threadRelays,
-    );
-
-    const profiles = {};
-    events.forEach((event) => {
-      const profile = parseProfileEvent(event);
-      if (!profile) return;
-      const existing = profiles[event.pubkey];
-      if (existing && existing.createdAt >= event.created_at) return;
-      profiles[event.pubkey] = { profile, createdAt: event.created_at };
-    });
-
-    return Object.fromEntries(
-      Object.entries(profiles).map(([pubkey, entry]) => [pubkey, entry.profile]),
-    );
-  } finally {
-    closeRelays(relays);
-  }
-}
-
-async function loadSnapshotFromDisk() {
-  try {
-    const cached = JSON.parse(await readFile(snapshotCacheFile, "utf8"));
-    if (
-      typeof cached.fetchedAt === "number" &&
-      Array.isArray(cached.processedEvents) &&
-      Array.isArray(cached.events) &&
-      cached.relayHintsByEventId &&
-      typeof cached.relayHintsByEventId === "object" &&
-      cached.profiles &&
-      typeof cached.profiles === "object"
-    ) {
-      snapshot = cached;
-    }
-  } catch {
-    // The cache is optional.
-  }
-}
-
-async function persistSnapshot(nextSnapshot) {
-  await mkdir(path.dirname(snapshotCacheFile), { recursive: true });
-  await writeFile(snapshotCacheFile, JSON.stringify(nextSnapshot), "utf8");
-}
-
-async function fetchFeedSnapshot() {
-  const feedBatch = await fetchGlobalFeedEvents();
-  const manifest = await getModerationManifest();
-  const visibleFeedEvents =
-    manifest.updatedAt === 0
-      ? feedBatch.events
-      : feedBatch.events.filter((event) => !isEventModerated(event, manifest));
-  const processedEvents = processFeedEvents(
-    visibleFeedEvents,
-    feedBatch.relayHintsByEventId,
-  );
-  const knownEventIds = new Set(visibleFeedEvents.map((event) => event.id));
-  const referencedBatch = await fetchReferencedEvents(
-    snapshotReferenceRefs(processedEvents),
-    knownEventIds,
-  );
-  const visibleReferencedEvents =
-    manifest.updatedAt === 0
-      ? referencedBatch.events
-      : referencedBatch.events.filter((event) => !isEventModerated(event, manifest));
-  const events = mergeEvents(visibleFeedEvents, visibleReferencedEvents);
-  const relayHintsByEventId = mergeRelayHints(
-    feedBatch.relayHintsByEventId,
-    referencedBatch.relayHintsByEventId,
-  );
-  const pubkeys = [
-    ...new Set([
-      ...processedEvents.flatMap((processed) => [
-        processed.postEvent.pubkey,
-        ...processed.replies.map((reply) => reply.pubkey),
-      ]),
-      ...visibleReferencedEvents.map((event) => event.pubkey),
-    ]),
-  ];
-  const profiles = await fetchProfileMetadata(pubkeys);
-
-  return {
-    fetchedAt: Date.now(),
-    processedEvents,
-    events,
-    relayHintsByEventId: serializeRelayHints(relayHintsByEventId),
-    profiles,
-  };
-}
-
-async function refreshSnapshot() {
-  if (refreshPromise) return refreshPromise;
-
-  refreshPromise = fetchFeedSnapshot()
-    .then(async (nextSnapshot) => {
-      snapshot = nextSnapshot;
-      lastRefreshError = null;
-      await persistSnapshot(nextSnapshot);
-      return nextSnapshot;
-    })
-    .catch((error) => {
-      lastRefreshError = error instanceof Error ? error.message : "refresh failed";
-      throw error;
-    })
-    .finally(() => {
-      refreshPromise = null;
-    });
-
-  return refreshPromise;
-}
-
-function snapshotStatus() {
-  return {
-    fetchedAt: snapshot?.fetchedAt || null,
-    postCount: snapshot?.processedEvents?.length || 0,
-    eventCount: snapshot?.events?.length || 0,
-    relayHintCount: snapshot ? Object.keys(snapshot.relayHintsByEventId || {}).length : 0,
-    profileCount: snapshot ? Object.keys(snapshot.profiles).length : 0,
-    refreshing: Boolean(refreshPromise),
-    lastRefreshError,
-    refreshSeconds,
-    ageHours: snapshotAgeHours,
-    timeoutMs: snapshotTimeoutMs,
-    powRelays,
-    enrichmentRelays,
-    cacheFile: snapshotCacheFile,
-  };
-}
-
-function handleClientConnection(client) {
-  stats.activeClients += 1;
-  stats.totalConnections += 1;
-  addRecent("client-connected", `${stats.activeClients} active`);
-
-  const backend = new WebSocket(backendUrl);
-  const queued = [];
-
-  backend.on("open", () => {
-    stats.lastBackendOpenAt = Date.now();
-    while (queued.length > 0 && backend.readyState === WebSocket.OPEN) {
-      backend.send(queued.shift());
-    }
-  });
-
-  backend.on("message", (data) => {
-    stats.backendMessages += 1;
-    const raw = data.toString();
-    const msg = safeJsonParse(raw);
-
-    if (Array.isArray(msg) && msg[0] === "OK") {
-      const ok = msg[2] === true;
-      if (ok) {
-        stats.acceptedPublishes += 1;
-        addRecent("accepted", msg[1]);
-      } else {
-        stats.backendRejectedPublishes += 1;
-        addRecent("backend-rejected", `${msg[1]}: ${msg[3] || ""}`);
-      }
-    }
-
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(raw);
-    }
-  });
-
-  backend.on("error", (error) => {
-    stats.lastBackendErrorAt = Date.now();
-    addRecent("backend-error", error.message);
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify(["NOTICE", "error: relay backend unavailable"]));
-    }
-  });
-
-  backend.on("close", () => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.close(1011, "relay backend closed");
-    }
-  });
-
-  client.on("message", (data) => {
-    stats.clientMessages += 1;
-    const raw = data.toString();
-    const msg = safeJsonParse(raw);
-
-    if (!Array.isArray(msg) || typeof msg[0] !== "string") {
-      stats.malformedMessages += 1;
-      addRecent("malformed", "invalid nostr message");
-      client.send(JSON.stringify(["NOTICE", "invalid: malformed nostr message"]));
-      return;
-    }
-
-    if (msg[0] === "EVENT") {
-      stats.publishAttempts += 1;
-      const event = msg[1];
-      const result = verifyPow(event);
-
-      if (!result.ok) {
-        stats.powRejectedPublishes += 1;
-        addRecent("pow-rejected", `${event?.id || "unknown"}: ${result.reason}`);
-        sendOk(client, event?.id, false, `pow: ${result.reason}`);
-        return;
-      }
-
-      addRecent("publish", summarizeEvent(event, result.pow));
-    } else if (msg[0] === "REQ" || msg[0] === "COUNT") {
-      stats.reqMessages += 1;
-    } else if (msg[0] === "CLOSE") {
-      stats.closeMessages += 1;
-    }
-
-    if (backend.readyState === WebSocket.OPEN) {
-      backend.send(raw);
-    } else if (backend.readyState === WebSocket.CONNECTING) {
-      queued.push(raw);
-    } else {
-      client.send(JSON.stringify(["NOTICE", "error: relay backend unavailable"]));
-    }
-  });
-
-  client.on("close", () => {
-    stats.activeClients = Math.max(0, stats.activeClients - 1);
-    addRecent("client-closed", `${stats.activeClients} active`);
-    if (backend.readyState === WebSocket.OPEN || backend.readyState === WebSocket.CONNECTING) {
-      backend.close();
-    }
-  });
-}
-
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "128kb" }));
-app.use((req, res, next) => {
-  setSecurityHeaders(res);
-  setCorsHeaders(res);
+app.use(httpAccess.middleware);
 
-  if (isPublicHost(req) && !isPublicHttpRouteAllowed(req)) {
-    res.status(404).json({ error: "not found" });
-    return;
-  }
-
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
-
-  next();
+registerHttpRoutes(app, {
+  backendUrl,
+  buildConfessXPostText,
+  confessContentMaxLength,
+  confessRelays,
+  confessStatusFromStore,
+  confessStoreFile,
+  confessXAuthMode,
+  confessXConfig,
+  confessXConfigured,
+  confessXImageHeight,
+  confessXImageTemplate,
+  confessXImageWidth,
+  confessXStatusFromStore,
+  createConfession,
+  feedSnapshot,
+  isAdminAuthorized: httpAccess.isAdminAuthorized,
+  isCronAuthorized: httpAccess.isCronAuthorized,
+  moderation,
+  moderationStoreFile,
+  parseConfessSecretKey,
+  publicDir: path.join(__dirname, "public"),
+  readConfessStore,
+  relayInfo,
+  renderConfessXImage,
+  stats,
 });
-
-app.get("/api/status", async (_req, res) => {
-  const actions = await getModerationActions();
-  const manifest = manifestFromActions(actions);
-  const confessStore = await readConfessStore();
-  const confessSecretKey = parseConfessSecretKey();
-  res.json({
-    ...stats,
-    uptimeSeconds: Math.floor((Date.now() - stats.startedAt) / 1000),
-    relayInfo,
-    snapshot: snapshotStatus(),
-    confess: {
-      ...confessStatusFromStore(confessStore),
-      storeFile: confessStoreFile,
-      relays: confessRelays,
-      linkedPubkey: confessSecretKey ? getPublicKey(confessSecretKey) : null,
-      xMirror: confessXStatusFromStore(confessStore),
-    },
-    moderation: {
-      actionCount: actions.length,
-      manifest,
-      storeFile: moderationStoreFile,
-    },
-    generatedAt: Date.now(),
-    instanceId: crypto
-      .createHash("sha256")
-      .update(`${stats.startedAt}:${backendUrl}`)
-      .digest("hex")
-      .slice(0, 12),
-  });
-});
-
-app.get("/api/feed/bootstrap", async (_req, res) => {
-  res.setHeader("Cache-Control", "public, max-age=120, stale-while-revalidate=300");
-  if (snapshot) {
-    res.json(snapshot);
-    return;
-  }
-
-  try {
-    res.json(await refreshSnapshot());
-  } catch {
-    res.status(503).json({
-      error: "bootstrap unavailable",
-      lastRefreshError,
-    });
-  }
-});
-
-app.get("/api/cron/refresh-feed", async (req, res) => {
-  if (!isCronAuthorized(req)) {
-    res.status(401).json({ error: "unauthorized" });
-    return;
-  }
-
-  try {
-    const nextSnapshot = await refreshSnapshot();
-    res.json({
-      ok: true,
-      fetchedAt: nextSnapshot.fetchedAt,
-      postCount: nextSnapshot.processedEvents.length,
-      profileCount: Object.keys(nextSnapshot.profiles).length,
-    });
-  } catch {
-    res.status(500).json({ error: lastRefreshError || "refresh failed" });
-  }
-});
-
-app.get("/healthz", (_req, res) => {
-  res.status(snapshot ? 200 : 503).json({
-    ok: Boolean(snapshot),
-    ...snapshotStatus(),
-  });
-});
-
-app.get("/api/confess/status", async (_req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  const store = await readConfessStore();
-  res.json({
-    ...confessStatusFromStore(store),
-    xMirror: {
-      enabled: confessXConfig.enabled,
-      dryRun: confessXConfig.dryRun,
-      configured: confessXConfigured(),
-      authMode: confessXAuthMode(),
-      accountHandle: confessXConfig.accountHandle || null,
-      postMode: "image",
-      image: {
-        width: confessXImageWidth,
-        height: confessXImageHeight,
-        template: confessXImageTemplate,
-      },
-    },
-  });
-});
-
-app.get("/api/confess/x-image-preview", async (req, res) => {
-  try {
-    const secretKey = parseConfessSecretKey();
-    const text = String(
-      req.query.text ||
-        "some things are easier to say when the signal does not point back at you.",
-    ).slice(0, confessContentMaxLength);
-    const eventId = crypto.createHash("sha256").update(`preview:${text}`).digest("hex");
-    const rendered = await renderConfessXImage({
-      text: buildConfessXPostText(text),
-      eventId,
-      pubkey: secretKey ? getPublicKey(secretKey) : "preview",
-    });
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("X-Confess-Image-Hash", rendered.imageHash);
-    res.setHeader("X-Confess-Image-Bytes", String(rendered.imageBytes));
-    res.send(rendered.buffer);
-  } catch (error) {
-    res.status(500).json({
-      error: error instanceof Error ? error.message : "image preview failed",
-    });
-  }
-});
-
-app.post("/api/confess", async (req, res) => {
-  try {
-    const result = await createConfession(req.body?.event);
-    res.status(201).json({ ok: true, ...result });
-  } catch (error) {
-    const statusCode =
-      typeof error?.statusCode === "number" ? error.statusCode : 500;
-    res.status(statusCode).json({
-      error: error instanceof Error ? error.message : "confess failed",
-      pow: typeof error?.pow === "number" ? error.pow : undefined,
-    });
-  }
-});
-
-app.get("/api/moderation/manifest", async (_req, res) => {
-  res.setHeader("Cache-Control", "public, max-age=15, stale-while-revalidate=45");
-  res.json(await getModerationManifest());
-});
-
-app.get("/api/moderation/actions", async (req, res) => {
-  if (!isAdminAuthorized(req)) {
-    res.status(401).json({ error: "unauthorized" });
-    return;
-  }
-  res.json({ actions: await getModerationActions() });
-});
-
-app.post("/api/moderation/actions", async (req, res) => {
-  if (!isAdminAuthorized(req)) {
-    res.status(401).json({ error: "unauthorized" });
-    return;
-  }
-
-  try {
-    const action = await createModerationAction(req.body || {});
-    void refreshSnapshot().catch(() => {
-      console.error(lastRefreshError || "moderation refresh failed");
-    });
-    res.status(201).json({ action });
-  } catch (error) {
-    res.status(400).json({
-      error: error instanceof Error ? error.message : "invalid action",
-    });
-  }
-});
-
-app.delete("/api/moderation/actions/:id", async (req, res) => {
-  if (!isAdminAuthorized(req)) {
-    res.status(401).json({ error: "unauthorized" });
-    return;
-  }
-
-  try {
-    const action = await deleteModerationAction(req.params.id);
-    void refreshSnapshot().catch(() => {
-      console.error(lastRefreshError || "moderation refresh failed");
-    });
-    res.json({ action });
-  } catch (error) {
-    res.status(404).json({
-      error: error instanceof Error ? error.message : "not found",
-    });
-  }
-});
-
-app.get("/", (req, res, next) => {
-  const accept = String(req.headers.accept || "");
-  if (accept.includes("application/nostr+json")) {
-    res.type("application/nostr+json").json(relayInfo);
-    return;
-  }
-  next();
-});
-
-app.use(
-  express.static(path.join(__dirname, "public"), {
-    extensions: ["html"],
-    setHeaders(res) {
-      res.setHeader("Cache-Control", "no-store");
-    },
-  }),
-);
 
 server.on("upgrade", (request, socket, head) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
@@ -2738,7 +962,7 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 await mkdir(dataDir, { recursive: true });
-await loadSnapshotFromDisk();
+await feedSnapshot.loadFromDisk();
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`Wired Admin gateway listening on ${port}`);
@@ -2746,14 +970,14 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`Feed snapshot cache: ${snapshotCacheFile}`);
 });
 
-void refreshSnapshot().catch(() => {
-  if (!snapshot) console.error(lastRefreshError || "initial refresh failed");
+void feedSnapshot.refresh().catch(() => {
+  if (!feedSnapshot.current()) console.error(feedSnapshot.lastRefreshError() || "initial refresh failed");
 });
 
 if (refreshSeconds > 0) {
   setInterval(() => {
-    void refreshSnapshot().catch(() => {
-      console.error(lastRefreshError || "scheduled refresh failed");
+    void feedSnapshot.refresh().catch(() => {
+      console.error(feedSnapshot.lastRefreshError() || "scheduled refresh failed");
     });
   }, refreshSeconds * 1000).unref();
 }
