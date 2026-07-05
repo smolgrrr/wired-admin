@@ -37,6 +37,11 @@ export type ConfessXMirrorStatus =
   | "dry_run"
   | "posted";
 
+export type ConfessXCustomEmoji = {
+  shortcode: string;
+  url: string;
+};
+
 export type ConfessXMirror = {
   enabled: boolean;
   dryRun: boolean;
@@ -51,6 +56,7 @@ export type ConfessXMirror = {
   nextAttemptAt?: number | null;
   text?: string;
   pubkey?: Pubkey;
+  customEmojis?: ConfessXCustomEmoji[];
   textHash?: string;
   textLength?: number;
   imageTemplate?: string;

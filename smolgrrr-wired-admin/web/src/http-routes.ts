@@ -49,6 +49,7 @@ type RegisterHttpRoutesDeps = {
     text: string;
     eventId: string;
     pubkey: string;
+    customEmojis?: { shortcode: string; url: string }[];
   }) => Promise<ConfessPostcardRenderResult>;
   stats: RelayStats;
 };

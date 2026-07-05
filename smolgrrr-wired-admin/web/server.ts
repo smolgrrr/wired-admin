@@ -21,7 +21,10 @@ import {
 } from "./src/utils.js";
 import { verifyPow as verifyEventPow } from "./src/pow.js";
 import { createXClient } from "./src/x-client.js";
-import { createConfessPostcardRenderer } from "./src/confess-postcard-renderer.js";
+import {
+  createConfessPostcardRenderer,
+  isSafeConfessPostcardImageUrl,
+} from "./src/confess-postcard-renderer.js";
 import { createModerationService } from "./src/moderation.js";
 import { createFeedSnapshotService } from "./src/feed-snapshot-service.js";
 import { registerHttpRoutes } from "./src/http-routes.js";
@@ -37,7 +40,12 @@ import type {
   RelayStats,
 } from "./src/contracts/api.js";
 import type { NostrEvent } from "./src/contracts/nostr.js";
-import type { ConfessPostRecord, ConfessStore, ConfessXMirror } from "./src/contracts/stores.js";
+import type {
+  ConfessPostRecord,
+  ConfessStore,
+  ConfessXCustomEmoji,
+  ConfessXMirror,
+} from "./src/contracts/stores.js";
 import { isNostrEvent, parseConfessStore } from "./src/contracts/validation.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -127,6 +135,14 @@ const confessXProfileImageTimeoutMs = Math.max(
 const confessXProfileImageMaxBytes = Math.max(
   10_000,
   Math.min(2_000_000, Number(process.env.CONFESS_X_PROFILE_IMAGE_MAX_BYTES || 1_000_000)),
+);
+const confessXEmojiImageTimeoutMs = Math.max(
+  1000,
+  Number(process.env.CONFESS_X_EMOJI_IMAGE_TIMEOUT_MS || confessXProfileImageTimeoutMs),
+);
+const confessXEmojiImageMaxBytes = Math.max(
+  10_000,
+  Math.min(1_000_000, Number(process.env.CONFESS_X_EMOJI_IMAGE_MAX_BYTES || 500_000)),
 );
 const confessXConfig = {
   enabled: readEnvFlag("CONFESS_X_ENABLED", false),
@@ -468,10 +484,12 @@ async function renderConfessXImage({
   text,
   eventId,
   pubkey,
+  customEmojis,
 }: {
   text: string;
   eventId: string;
   pubkey: string;
+  customEmojis?: ConfessXCustomEmoji[];
 }) {
   confessPostcardRenderer ??= createConfessPostcardRenderer({
     image: {
@@ -484,9 +502,20 @@ async function renderConfessXImage({
       timeoutMs: confessXProfileImageTimeoutMs,
       maxBytes: confessXProfileImageMaxBytes,
     },
+    customEmojiImage: {
+      timeoutMs: confessXEmojiImageTimeoutMs,
+      maxBytes: confessXEmojiImageMaxBytes,
+      limitInputPixels: 1024 * 1024,
+      outputSize: 128,
+    },
     fetchProfileMetadata: feedSnapshot.fetchProfileMetadata,
   });
-  return confessPostcardRenderer.render({ text, eventId, pubkey });
+  return confessPostcardRenderer.render({
+    text,
+    eventId,
+    pubkey,
+    ...(customEmojis ? { customEmojis } : {}),
+  });
 }
 
 const xMentionPattern = /(^|[^a-z0-9_])@[a-z0-9_]{1,15}\b/i;
@@ -564,9 +593,32 @@ function validateConfessXSafety(
   return { ok: true, reason: "", textHash };
 }
 
+const confessXEmojiShortcodePattern = /^[^\s:]{1,64}$/u;
+
+function customEmojisForConfessXMirror(event: NostrEvent, text: string): ConfessXCustomEmoji[] {
+  const result = new Map<string, ConfessXCustomEmoji>();
+
+  for (const tag of event.tags || []) {
+    if (tag[0] !== "emoji" || !tag[1] || !tag[2]) continue;
+
+    const shortcode = tag[1].trim();
+    const url = tag[2].trim();
+    if (!confessXEmojiShortcodePattern.test(shortcode)) continue;
+    if (!text.includes(`:${shortcode}:`)) continue;
+    if (!isSafeConfessPostcardImageUrl(url)) continue;
+    if (result.has(shortcode)) continue;
+
+    result.set(shortcode, { shortcode, url: new URL(url).toString() });
+    if (result.size >= 32) break;
+  }
+
+  return Array.from(result.values());
+}
+
 function initialConfessXMirror(event: NostrEvent, store: ConfessStore): ConfessXMirror {
   const now = Date.now();
   const text = buildConfessXPostText(event.content);
+  const customEmojis = customEmojisForConfessXMirror(event, text);
   const base = {
     enabled: confessXConfig.enabled,
     dryRun: confessXConfig.dryRun,
@@ -607,6 +659,7 @@ function initialConfessXMirror(event: NostrEvent, store: ConfessStore): ConfessX
     textHash: safety.textHash,
     textLength: text.length,
     imageTemplate: confessXImageTemplate,
+    ...(customEmojis.length > 0 ? { customEmojis } : {}),
   };
 }
 
@@ -688,6 +741,7 @@ async function postConfessXText(
         text,
         eventId,
         pubkey: existingMirror?.pubkey || "",
+        ...(existingMirror?.customEmojis ? { customEmojis: existingMirror.customEmojis } : {}),
       });
       dryRunPatch.imageHash = rendered.imageHash;
       dryRunPatch.imageBytes = rendered.imageBytes;
@@ -724,6 +778,7 @@ async function postConfessXText(
         text,
         eventId,
         pubkey: existingMirror?.pubkey || "",
+        ...(existingMirror?.customEmojis ? { customEmojis: existingMirror.customEmojis } : {}),
       });
       imagePatch = {
         imageHash: rendered.imageHash,
