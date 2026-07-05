@@ -34,7 +34,7 @@ The workflow has working defaults for this host. Configure these repository vari
 
 - `UMBREL_DEPLOY_UMBREL_DIR`: Umbrel data directory, default `/home/umbrel/umbrel`.
 - `UMBREL_DEPLOY_REPO_DIR`: App-store checkout path, default `/home/umbrel/dev/wired-pow-relay-app`.
-- `UMBREL_DEPLOY_PUBLIC_BASE_URL`: Public base URL, default `https://wiredsignal.online`.
+- `UMBREL_DEPLOY_PUBLIC_BASE_URL`: Optional public base URL for extra smoke checks. Set this only when the URL routes to the Umbrel app API.
 - `UMBREL_DEPLOY_PUBLIC_SMOKE_URLS`: Explicit comma- or whitespace-separated public URLs to check instead of deriving them from `UMBREL_DEPLOY_PUBLIC_BASE_URL`.
 
 No SSH deploy secrets are required for the self-hosted runner path.
@@ -52,7 +52,6 @@ Useful overrides:
 ```sh
 UMBREL_DIR=/home/umbrel/umbrel \
 WIRED_ADMIN_APP_STORE_DIR=/home/umbrel/dev/wired-pow-relay-app \
-WIRED_ADMIN_PUBLIC_BASE_URL=https://wiredsignal.online \
 node scripts/deploy-wired-admin-umbrel.mjs
 ```
 
