@@ -48,3 +48,38 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    name: Deploy to Umbrel
+    runs-on: [self-hosted, umbrel, wired-admin]
+    needs: publish
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      UMBREL_DEPLOY_UMBREL_DIR: ${{ vars.UMBREL_DEPLOY_UMBREL_DIR }}
+      UMBREL_DEPLOY_REPO_DIR: ${{ vars.UMBREL_DEPLOY_REPO_DIR }}
+      UMBREL_DEPLOY_PUBLIC_BASE_URL: ${{ vars.UMBREL_DEPLOY_PUBLIC_BASE_URL }}
+      UMBREL_DEPLOY_PUBLIC_SMOKE_URLS: ${{ vars.UMBREL_DEPLOY_PUBLIC_SMOKE_URLS }}
+    steps:
+      - name: Deploy from Umbrel host
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${WIRED_ADMIN_APP_ID:=smolgrrr-wired-admin}"
+
+          UMBREL_DIR="${UMBREL_DEPLOY_UMBREL_DIR:-${UMBREL_DIR:-/home/umbrel/umbrel}}"
+          WIRED_ADMIN_APP_STORE_DIR="${UMBREL_DEPLOY_REPO_DIR:-${WIRED_ADMIN_APP_STORE_DIR:-/home/umbrel/dev/wired-pow-relay-app}}"
+          WIRED_ADMIN_PUBLIC_BASE_URL="${UMBREL_DEPLOY_PUBLIC_BASE_URL:-${WIRED_ADMIN_PUBLIC_BASE_URL:-https://wiredsignal.online}}"
+
+          export UMBREL_DIR
+          export WIRED_ADMIN_APP_STORE_DIR
+          export WIRED_ADMIN_PUBLIC_BASE_URL
+          export WIRED_ADMIN_PUBLIC_SMOKE_URLS="${UMBREL_DEPLOY_PUBLIC_SMOKE_URLS:-}"
+
+          cd "${WIRED_ADMIN_APP_STORE_DIR}"
+          git fetch origin main --prune
+          git checkout main
+          git pull --ff-only origin main
+          node scripts/deploy-wired-admin-umbrel.mjs
