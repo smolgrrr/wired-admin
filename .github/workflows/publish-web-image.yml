@@ -71,7 +71,7 @@ jobs:
 
           UMBREL_DIR="${UMBREL_DEPLOY_UMBREL_DIR:-${UMBREL_DIR:-/home/umbrel/umbrel}}"
           WIRED_ADMIN_APP_STORE_DIR="${UMBREL_DEPLOY_REPO_DIR:-${WIRED_ADMIN_APP_STORE_DIR:-/home/umbrel/dev/wired-pow-relay-app}}"
-          WIRED_ADMIN_PUBLIC_BASE_URL="${UMBREL_DEPLOY_PUBLIC_BASE_URL:-${WIRED_ADMIN_PUBLIC_BASE_URL:-https://wiredsignal.online}}"
+          WIRED_ADMIN_PUBLIC_BASE_URL="${UMBREL_DEPLOY_PUBLIC_BASE_URL:-${WIRED_ADMIN_PUBLIC_BASE_URL:-}}"
 
           export UMBREL_DIR
           export WIRED_ADMIN_APP_STORE_DIR
