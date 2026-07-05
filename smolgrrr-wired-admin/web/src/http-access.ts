@@ -1,10 +1,15 @@
 import { isPublicHost } from "./utils.js";
+import type { NextFunction, Request, Response } from "express";
 
-function acceptsNostrJson(req) {
+type SecurityHeaders = Record<string, string>;
+
+export type HttpAccess = ReturnType<typeof createHttpAccess>;
+
+function acceptsNostrJson(req: Request): boolean {
   return String(req.headers.accept || "").includes("application/nostr+json");
 }
 
-function isPublicHttpRouteAllowed(req) {
+function isPublicHttpRouteAllowed(req: Request): boolean {
   const url = new URL(req.originalUrl || req.url || "/", "http://localhost");
 
   if (url.pathname === "/") {
@@ -30,7 +35,7 @@ function isPublicHttpRouteAllowed(req) {
   return false;
 }
 
-function setCorsHeaders(res) {
+function setCorsHeaders(res: Response): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader(
@@ -39,31 +44,37 @@ function setCorsHeaders(res) {
   );
 }
 
-function setSecurityHeaders(res, securityHeaders) {
+function setSecurityHeaders(res: Response, securityHeaders: SecurityHeaders): void {
   for (const [header, value] of Object.entries(securityHeaders)) {
     res.setHeader(header, value);
   }
 }
 
-function adminBearerToken(req) {
+function adminBearerToken(req: Request): string | null {
   const value = req.headers.authorization;
   if (!value?.startsWith("Bearer ")) return null;
   return value.slice("Bearer ".length).trim();
 }
 
-function isLocalRequest(req) {
+function isLocalRequest(req: Request): boolean {
   const remote = req.socket.remoteAddress || "";
   return remote === "127.0.0.1" || remote === "::1" || remote.startsWith("::ffff:127.");
 }
 
-export function createHttpAccess({ publicHostPatterns, securityHeaders }) {
-  function isCronAuthorized(req) {
+export function createHttpAccess({
+  publicHostPatterns,
+  securityHeaders,
+}: {
+  publicHostPatterns: string[];
+  securityHeaders: SecurityHeaders;
+}) {
+  function isCronAuthorized(req: Request): boolean {
     const cronSecret = process.env.CRON_SECRET;
     if (!cronSecret) return true;
     return req.headers.authorization === `Bearer ${cronSecret}`;
   }
 
-  function isAdminAuthorized(req) {
+  function isAdminAuthorized(req: Request): boolean {
     if (isPublicHost(req, publicHostPatterns)) return false;
     if (process.env.MODERATION_ADMIN_OPEN === "true") return true;
 
@@ -72,7 +83,7 @@ export function createHttpAccess({ publicHostPatterns, securityHeaders }) {
     return adminBearerToken(req) === token || req.headers["x-admin-token"] === token;
   }
 
-  function middleware(req, res, next) {
+  function middleware(req: Request, res: Response, next: NextFunction): void {
     setSecurityHeaders(res, securityHeaders);
     setCorsHeaders(res);
 

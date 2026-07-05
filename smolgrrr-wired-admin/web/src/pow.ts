@@ -1,6 +1,12 @@
-import { getEventHash } from "nostr-tools";
+import { getEventHash, type Event } from "nostr-tools";
 
-export function countLeadingZeroBits(hex) {
+export type PowResult = {
+  ok: boolean;
+  reason: string;
+  pow: number;
+};
+
+export function countLeadingZeroBits(hex: string): number {
   let count = 0;
   for (const char of hex) {
     const nibble = Number.parseInt(char, 16);
@@ -14,26 +20,28 @@ export function countLeadingZeroBits(hex) {
   return count;
 }
 
-export function eventPow(event) {
-  if (!event || typeof event !== "object" || typeof event.id !== "string") {
+export function eventPow(event: unknown): number {
+  const candidate = event as Partial<Event> | null;
+  if (!candidate || typeof candidate !== "object" || typeof candidate.id !== "string") {
     return 0;
   }
-  return countLeadingZeroBits(event.id);
+  return countLeadingZeroBits(candidate.id);
 }
 
-export function verifyPow(event, requiredPow) {
+export function verifyPow(event: unknown, requiredPow: number): PowResult {
   if (!event || typeof event !== "object") {
     return { ok: false, reason: "invalid event", pow: 0 };
   }
 
   let hash;
   try {
-    hash = getEventHash(event);
+    hash = getEventHash(event as Event);
   } catch {
     return { ok: false, reason: "invalid event hash", pow: 0 };
   }
 
-  if (hash !== event.id) {
+  const candidate = event as Partial<Event>;
+  if (hash !== candidate.id) {
     return {
       ok: false,
       reason: "event id does not match event hash",
@@ -42,8 +50,8 @@ export function verifyPow(event, requiredPow) {
   }
 
   const pow = countLeadingZeroBits(hash);
-  const nonceTag = Array.isArray(event.tags)
-    ? event.tags.find((tag) => Array.isArray(tag) && tag[0] === "nonce")
+  const nonceTag = Array.isArray(candidate.tags)
+    ? candidate.tags.find((tag) => Array.isArray(tag) && tag[0] === "nonce")
     : undefined;
   const claimedTarget = Number.parseInt(nonceTag?.[2] || "", 10);
 

@@ -1,4 +1,6 @@
 node_modules/
+dist/
+dist-admin-client/
 .DS_Store
 *.log
 data/

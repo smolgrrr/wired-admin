@@ -1,26 +1,67 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { nip19, Relay } from "nostr-tools";
+import { nip19, Relay, type Filter } from "nostr-tools";
 import { eventPow } from "./pow.js";
-import { normalizeUrl, uniqueSorted } from "./utils.js";
+import { normalizeRelayUrl, normalizeUrl, uniqueRelays } from "./utils.js";
+import type {
+  FeedBootstrapSnapshot,
+  FeedSnapshotStatus,
+  ProcessedFeedEvent,
+  ProfileSummary,
+} from "./contracts/api.js";
+import type {
+  NostrEvent,
+  Pubkey,
+  ReferencedEventRef,
+  RelayHintsByEventId,
+  RelayHintsRecord,
+  RelayUrl,
+} from "./contracts/nostr.js";
+import type { ModerationService } from "./moderation.js";
+import { isNostrEvent, parseFeedBootstrapSnapshot } from "./contracts/validation.js";
 
-function isRootNote(event) {
+type ConnectedRelay = Awaited<ReturnType<typeof Relay.connect>>;
+
+type SubscriptionLike = {
+  close: () => void;
+};
+
+type RelayBatch = {
+  events: NostrEvent[];
+  relayHintsByEventId: RelayHintsByEventId;
+};
+
+type FeedSnapshotServiceOptions = {
+  cacheFile: string;
+  refreshSeconds: number;
+  ageHours: number;
+  timeoutMs: number;
+  replyFetchDepth: number;
+  minPow: number;
+  powRelays: RelayUrl[];
+  enrichmentRelays: RelayUrl[];
+  threadRelays: RelayUrl[];
+  moderation: ModerationService;
+};
+
+type FetchReplyClosureOptions = {
+  relays: ConnectedRelay[];
+  parentIds: string[];
+  relayUrls: RelayUrl[];
+  knownEventIds?: Set<string>;
+};
+
+export type FeedSnapshotService = ReturnType<typeof createFeedSnapshotService>;
+
+function isRootNote(event: NostrEvent): boolean {
   return event.kind === 1 && !(event.tags || []).some((tag) => tag[0] === "e");
 }
 
-function sinceFromAgeHours(ageHours) {
+function sinceFromAgeHours(ageHours: number): number {
   return Math.floor(Date.now() / 1000) - ageHours * 60 * 60;
 }
 
-function normalizeRelayUrl(url) {
-  return url.replace(/\/+$/, "");
-}
-
-function uniqueRelays(relays) {
-  return [...new Set(relays.map(normalizeRelayUrl).filter(Boolean))];
-}
-
-function addRelayHint(relayHintsByEventId, eventId, relayUrl) {
+function addRelayHint(relayHintsByEventId: RelayHintsByEventId, eventId: string, relayUrl: string): void {
   const normalizedRelay = normalizeRelayUrl(relayUrl);
   const existing = relayHintsByEventId.get(eventId) || [];
   if (existing.includes(normalizedRelay)) return;
@@ -28,8 +69,8 @@ function addRelayHint(relayHintsByEventId, eventId, relayUrl) {
   relayHintsByEventId.set(eventId, [...existing, normalizedRelay]);
 }
 
-function mergeRelayHints(...hintGroups) {
-  const merged = new Map();
+function mergeRelayHints(...hintGroups: RelayHintsByEventId[]): RelayHintsByEventId {
+  const merged: RelayHintsByEventId = new Map();
 
   hintGroups.forEach((relayHintsByEventId) => {
     relayHintsByEventId.forEach((relays, eventId) => {
@@ -40,15 +81,15 @@ function mergeRelayHints(...hintGroups) {
   return merged;
 }
 
-function mergeEvents(...eventGroups) {
-  const merged = new Map();
+function mergeEvents(...eventGroups: NostrEvent[][]): NostrEvent[] {
+  const merged = new Map<string, NostrEvent>();
   eventGroups.forEach((events) => {
     events.forEach((event) => merged.set(event.id, event));
   });
   return [...merged.values()];
 }
 
-function serializeRelayHints(relayHintsByEventId) {
+function serializeRelayHints(relayHintsByEventId: RelayHintsByEventId): RelayHintsRecord {
   return Object.fromEntries(
     [...relayHintsByEventId.entries()].map(([eventId, relays]) => [
       eventId,
@@ -60,7 +101,7 @@ function serializeRelayHints(relayHintsByEventId) {
 const eventIdPattern = /^[0-9a-f]{64}$/i;
 const nostrRefPattern = /nostr:(?:note|nevent|naddr|npub|nprofile|nrelay)1[a-z0-9]+/gi;
 
-function decodeNostrEventRef(ref) {
+function decodeNostrEventRef(ref: unknown): ReferencedEventRef | null {
   const bech32 = String(ref || "").replace(/^nostr:/i, "");
   try {
     const decoded = nip19.decode(bech32);
@@ -79,7 +120,7 @@ function decodeNostrEventRef(ref) {
   return null;
 }
 
-function addReferencedEventRef(refsById, id, relays = []) {
+function addReferencedEventRef(refsById: Map<string, ReferencedEventRef>, id: string, relays: string[] = []): void {
   if (!eventIdPattern.test(id)) return;
 
   const normalizedId = id.toLowerCase();
@@ -91,8 +132,8 @@ function addReferencedEventRef(refsById, id, relays = []) {
   refsById.set(normalizedId, { id: normalizedId, relays: uniqueRelays(relays) });
 }
 
-function extractMentionedEventRefs(event) {
-  const refsById = new Map();
+function extractMentionedEventRefs(event: NostrEvent): ReferencedEventRef[] {
+  const refsById = new Map<string, ReferencedEventRef>();
 
   for (const tag of event.tags || []) {
     if ((tag[0] === "q" || tag[0] === "e") && tag[1]) {
@@ -122,7 +163,7 @@ function extractMentionedEventRefs(event) {
   return [...refsById.values()];
 }
 
-async function connectRelays(urls) {
+async function connectRelays(urls: RelayUrl[]): Promise<ConnectedRelay[]> {
   const relays = await Promise.all(
     urls.map(async (url) => {
       try {
@@ -132,10 +173,10 @@ async function connectRelays(urls) {
       }
     }),
   );
-  return relays.filter(Boolean);
+  return relays.filter((relay): relay is ConnectedRelay => Boolean(relay));
 }
 
-function closeRelays(relays) {
+function closeRelays(relays: ConnectedRelay[]): void {
   relays.forEach((relay) => {
     try {
       relay.close();
@@ -145,7 +186,7 @@ function closeRelays(relays) {
   });
 }
 
-function buildReplyFilter(parentIds, since) {
+function buildReplyFilter(parentIds: string[], since: number): Filter | null {
   const ids = parentIds.slice(0, 50);
   if (ids.length === 0) return null;
   return {
@@ -156,8 +197,8 @@ function buildReplyFilter(parentIds, since) {
   };
 }
 
-function buildRepliesByParent(events) {
-  const repliesByParent = new Map();
+function buildRepliesByParent(events: NostrEvent[]): Map<string, NostrEvent[]> {
+  const repliesByParent = new Map<string, NostrEvent[]>();
   events.forEach((event) => {
     if (event.kind !== 1) return;
     (event.tags || []).forEach((tag) => {
@@ -170,8 +211,8 @@ function buildRepliesByParent(events) {
   return repliesByParent;
 }
 
-function collectThreadReplies(rootId, repliesByParent) {
-  const replies = [];
+function collectThreadReplies(rootId: string, repliesByParent: Map<string, NostrEvent[]>): NostrEvent[] {
+  const replies: NostrEvent[] = [];
   const seen = new Set();
   const pending = [...(repliesByParent.get(rootId) || [])];
   while (pending.length > 0) {
@@ -184,11 +225,11 @@ function collectThreadReplies(rootId, repliesByParent) {
   return replies;
 }
 
-function eventWork(event) {
+function eventWork(event: NostrEvent): number {
   return Math.pow(2, eventPow(event));
 }
 
-function relayHintsForEvent(eventId, relayHintsByEventId) {
+function relayHintsForEvent(eventId: string, relayHintsByEventId: RelayHintsByEventId): RelayUrl[] | undefined {
   const relayHints = relayHintsByEventId?.get(eventId);
   if (!relayHints) return undefined;
 
@@ -196,8 +237,8 @@ function relayHintsForEvent(eventId, relayHintsByEventId) {
   return normalized.length > 0 ? normalized : undefined;
 }
 
-function snapshotReferenceRefs(processedEvents) {
-  const byId = new Map();
+function snapshotReferenceRefs(processedEvents: ProcessedFeedEvent[]): ReferencedEventRef[] {
+  const byId = new Map<string, ReferencedEventRef>();
 
   processedEvents.forEach((processed) => {
     extractMentionedEventRefs(processed.postEvent).forEach((ref) => {
@@ -213,20 +254,20 @@ function snapshotReferenceRefs(processedEvents) {
   return [...byId.values()];
 }
 
-function parseProfileEvent(event) {
+function parseProfileEvent(event: NostrEvent): ProfileSummary | null {
   if (event.kind !== 0) return null;
   try {
-    const raw = JSON.parse(event.content);
-    const profile = {
-      name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : undefined,
-      displayName:
-        typeof raw.display_name === "string" && raw.display_name.trim()
-          ? raw.display_name.trim()
-          : typeof raw.displayName === "string" && raw.displayName.trim()
-            ? raw.displayName.trim()
-            : undefined,
-      picture: undefined,
-    };
+    const raw = JSON.parse(event.content) as Record<string, unknown>;
+    const profile: ProfileSummary = {};
+    const name = typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : undefined;
+    const displayName =
+      typeof raw.display_name === "string" && raw.display_name.trim()
+        ? raw.display_name.trim()
+        : typeof raw.displayName === "string" && raw.displayName.trim()
+          ? raw.displayName.trim()
+          : undefined;
+    if (name) profile.name = name;
+    if (displayName) profile.displayName = displayName;
     if (typeof raw.picture === "string") {
       const picture = normalizeUrl(raw.picture.trim());
       if (picture) profile.picture = picture;
@@ -248,12 +289,12 @@ export function createFeedSnapshotService({
   enrichmentRelays,
   threadRelays,
   moderation,
-}) {
-  let snapshot = null;
-  let lastRefreshError = null;
-  let refreshPromise = null;
+}: FeedSnapshotServiceOptions) {
+  let snapshot: FeedBootstrapSnapshot | null = null;
+  let lastRefreshError: string | null = null;
+  let refreshPromise: Promise<FeedBootstrapSnapshot> | null = null;
 
-  async function subscribeOnce(relays, filter, relayUrls) {
+  async function subscribeOnce(relays: ConnectedRelay[], filter: Filter, relayUrls?: RelayUrl[]): Promise<RelayBatch> {
     const targetRelays = relayUrls
       ? relays.filter((relay) =>
           relayUrls.some((url) => normalizeRelayUrl(url) === normalizeRelayUrl(relay.url)),
@@ -264,12 +305,12 @@ export function createFeedSnapshotService({
       return { events: [], relayHintsByEventId: new Map() };
     }
 
-    const events = [];
-    const seenIds = new Set();
-    const relayHintsByEventId = new Map();
+    const events: NostrEvent[] = [];
+    const seenIds = new Set<string>();
+    const relayHintsByEventId: RelayHintsByEventId = new Map();
 
-    await new Promise((resolve) => {
-      const subscriptions = [];
+    await new Promise<void>((resolve) => {
+      const subscriptions: SubscriptionLike[] = [];
       let eoseCount = 0;
       let settled = false;
 
@@ -292,7 +333,8 @@ export function createFeedSnapshotService({
       for (const relay of targetRelays) {
         try {
           const sub = relay.subscribe([filter], {
-            onevent(event) {
+            onevent(event: unknown) {
+              if (!isNostrEvent(event)) return;
               addRelayHint(relayHintsByEventId, event.id, relay.url);
               if (!seenIds.has(event.id)) {
                 seenIds.add(event.id);
@@ -315,10 +357,10 @@ export function createFeedSnapshotService({
     return { events, relayHintsByEventId };
   }
 
-  async function fetchReplyClosure({ relays, parentIds, relayUrls, knownEventIds = new Set() }) {
-    const replyEvents = [];
-    const seenReplyIds = new Set();
-    const replyRelayHintsByEventId = new Map();
+  async function fetchReplyClosure({ relays, parentIds, relayUrls, knownEventIds = new Set() }: FetchReplyClosureOptions): Promise<RelayBatch> {
+    const replyEvents: NostrEvent[] = [];
+    const seenReplyIds = new Set<string>();
+    const replyRelayHintsByEventId: RelayHintsByEventId = new Map();
     const since = sinceFromAgeHours(ageHours);
     let nextParents = [...parentIds];
 
@@ -327,7 +369,7 @@ export function createFeedSnapshotService({
       if (!replyFilter) break;
 
       const replyBatch = await subscribeOnce(relays, replyFilter, relayUrls);
-      const childParentIds = [];
+      const childParentIds: string[] = [];
 
       replyBatch.relayHintsByEventId.forEach((relaysForEvent, eventId) => {
         relaysForEvent.forEach((relay) => addRelayHint(replyRelayHintsByEventId, eventId, relay));
@@ -347,10 +389,10 @@ export function createFeedSnapshotService({
     return { events: replyEvents, relayHintsByEventId: replyRelayHintsByEventId };
   }
 
-  async function fetchGlobalFeedEvents() {
+  async function fetchGlobalFeedEvents(): Promise<RelayBatch> {
     const relays = await connectRelays(threadRelays);
     try {
-      const notes = new Set();
+      const notes = new Set<string>();
       const since = sinceFromAgeHours(ageHours);
       const rootBatch = await subscribeOnce(
         relays,
@@ -381,7 +423,7 @@ export function createFeedSnapshotService({
     }
   }
 
-  function workScoreBreakdown(event, replies) {
+  function workScoreBreakdown(event: NostrEvent, replies: NostrEvent[]) {
     let rankingReplyCount = 0;
     const replyWork = replies.reduce((sum, reply) => {
       const difficulty = eventPow(reply);
@@ -398,10 +440,10 @@ export function createFeedSnapshotService({
     };
   }
 
-  function processFeedEvents(events, relayHintsByEventId = new Map()) {
+  function processFeedEvents(events: NostrEvent[], relayHintsByEventId: RelayHintsByEventId = new Map()): ProcessedFeedEvent[] {
     const repliesByParent = buildRepliesByParent(events);
-    const seenPubkeys = new Set();
-    const posts = [];
+    const seenPubkeys = new Set<string>();
+    const posts: NostrEvent[] = [];
 
     events.forEach((event) => {
       if (!isRootNote(event)) return;
@@ -414,18 +456,20 @@ export function createFeedSnapshotService({
     return posts
       .map((postEvent) => {
         const replies = collectThreadReplies(postEvent.id, repliesByParent);
-        return {
+        const processed: ProcessedFeedEvent = {
           postEvent,
           replies,
-          relayHints: relayHintsForEvent(postEvent.id, relayHintsByEventId),
           threadReplyCount: replies.length,
           ...workScoreBreakdown(postEvent, replies),
         };
+        const relayHints = relayHintsForEvent(postEvent.id, relayHintsByEventId);
+        if (relayHints) processed.relayHints = relayHints;
+        return processed;
       })
       .sort((a, b) => b.totalWork - a.totalWork || b.postEvent.created_at - a.postEvent.created_at);
   }
 
-  async function fetchReferencedEvents(refs, knownEventIds) {
+  async function fetchReferencedEvents(refs: ReferencedEventRef[], knownEventIds: Set<string>): Promise<RelayBatch> {
     const missingRefs = refs.filter((ref) => !knownEventIds.has(ref.id));
     if (missingRefs.length === 0) {
       return { events: [], relayHintsByEventId: new Map() };
@@ -467,7 +511,7 @@ export function createFeedSnapshotService({
     }
   }
 
-  async function fetchProfileMetadata(pubkeys) {
+  async function fetchProfileMetadata(pubkeys: Pubkey[]): Promise<Record<Pubkey, ProfileSummary>> {
     if (pubkeys.length === 0) return {};
     const relays = await connectRelays(threadRelays);
     try {
@@ -480,8 +524,7 @@ export function createFeedSnapshotService({
         },
         threadRelays,
       );
-
-      const profiles = {};
+      const profiles: Record<Pubkey, { profile: ProfileSummary; createdAt: number }> = {};
       events.forEach((event) => {
         const profile = parseProfileEvent(event);
         if (!profile) return;
@@ -498,18 +541,10 @@ export function createFeedSnapshotService({
     }
   }
 
-  async function loadFromDisk() {
+  async function loadFromDisk(): Promise<void> {
     try {
       const cached = JSON.parse(await readFile(cacheFile, "utf8"));
-      if (
-        typeof cached.fetchedAt === "number" &&
-        Array.isArray(cached.processedEvents) &&
-        Array.isArray(cached.events) &&
-        cached.relayHintsByEventId &&
-        typeof cached.relayHintsByEventId === "object" &&
-        cached.profiles &&
-        typeof cached.profiles === "object"
-      ) {
+      if (parseFeedBootstrapSnapshot(cached)) {
         snapshot = cached;
       }
     } catch {
@@ -517,12 +552,12 @@ export function createFeedSnapshotService({
     }
   }
 
-  async function persist(nextSnapshot) {
+  async function persist(nextSnapshot: FeedBootstrapSnapshot): Promise<void> {
     await mkdir(path.dirname(cacheFile), { recursive: true });
     await writeFile(cacheFile, JSON.stringify(nextSnapshot), "utf8");
   }
 
-  async function fetch() {
+  async function fetch(): Promise<FeedBootstrapSnapshot> {
     const feedBatch = await fetchGlobalFeedEvents();
     const manifest = await moderation.getManifest();
     const visibleFeedEvents =
@@ -567,7 +602,7 @@ export function createFeedSnapshotService({
     };
   }
 
-  async function refresh() {
+  async function refresh(): Promise<FeedBootstrapSnapshot> {
     if (refreshPromise) return refreshPromise;
 
     refreshPromise = fetch()
@@ -588,7 +623,7 @@ export function createFeedSnapshotService({
     return refreshPromise;
   }
 
-  function status() {
+  function status(): FeedSnapshotStatus {
     return {
       fetchedAt: snapshot?.fetchedAt || null,
       postCount: snapshot?.processedEvents?.length || 0,

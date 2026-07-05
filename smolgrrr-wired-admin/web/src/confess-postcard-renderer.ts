@@ -3,8 +3,42 @@ import net from "node:net";
 import sharp from "sharp";
 import { nip19 } from "nostr-tools";
 import { countLeadingZeroBits } from "./pow.js";
+import type { ProfileSummary } from "./contracts/api.js";
 
-function escapeXml(value) {
+export type ConfessPostcardImageConfig = {
+  width: number;
+  height: number;
+  maxBytes: number;
+  template: string;
+};
+
+export type ConfessPostcardRendererOptions = {
+  image: ConfessPostcardImageConfig;
+  profileImage: {
+    timeoutMs: number;
+    maxBytes: number;
+  };
+  fetchProfileMetadata: (pubkeys: string[]) => Promise<Record<string, ProfileSummary>>;
+};
+
+export type ConfessPostcardRenderInput = {
+  text: string;
+  eventId: string;
+  pubkey: string;
+};
+
+export type ConfessPostcardRenderResult = {
+  buffer: Buffer;
+  imageHash: string;
+  imageBytes: number;
+  width: number;
+  height: number;
+  template: string;
+};
+
+type SvgProfile = ProfileSummary | null;
+
+function escapeXml(value: unknown): string {
   return String(value || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -13,7 +47,7 @@ function escapeXml(value) {
     .replace(/'/g, "&#39;");
 }
 
-function normalizeSvgText(value) {
+function normalizeSvgText(value: unknown): string {
   return String(value || "")
     .replace(/\r\n?/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
@@ -21,13 +55,13 @@ function normalizeSvgText(value) {
     .trim();
 }
 
-function wrapSvgText(value, maxCharacters, maxLines) {
+function wrapSvgText(value: unknown, maxCharacters: number, maxLines: number): string[] {
   const paragraphs = normalizeSvgText(value).split("\n");
-  const lines = [];
+  const lines: string[] = [];
   let truncated = false;
 
   for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
-    const paragraph = paragraphs[paragraphIndex];
+    const paragraph = paragraphs[paragraphIndex] ?? "";
     if (lines.length >= maxLines) {
       truncated = true;
       break;
@@ -73,23 +107,24 @@ function wrapSvgText(value, maxCharacters, maxLines) {
   const limited = lines.slice(0, maxLines);
   if (limited.length === 0) limited.push("");
   if (truncated && limited.length > 0) {
-    limited[limited.length - 1] = `${limited[limited.length - 1].replace(/\s+$/, "")}...`;
+    const lastLine = limited[limited.length - 1] ?? "";
+    limited[limited.length - 1] = `${lastLine.replace(/\s+$/, "")}...`;
   }
   return limited;
 }
 
-function avatarCellsForPubkey(pubkey) {
+function avatarCellsForPubkey(pubkey: string): boolean[] {
   const digest = crypto.createHash("sha256").update(String(pubkey || "")).digest();
-  return Array.from({ length: 16 }, (_, index) => (digest[index] & 1) === 1);
+  return Array.from({ length: 16 }, (_, index) => ((digest[index] ?? 0) & 1) === 1);
 }
 
-function truncateSvgLabel(value, maxLength) {
+function truncateSvgLabel(value: unknown, maxLength: number): string {
   const label = String(value || "").replace(/\s+/g, " ").trim();
   if (label.length <= maxLength) return label;
   return `${label.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
 }
 
-function confessProfileDisplayName(profile, pubkey) {
+function confessProfileDisplayName(profile: SvgProfile, pubkey: string): string {
   if (profile?.displayName) return profile.displayName;
   if (profile?.name) return profile.name;
   try {
@@ -99,7 +134,19 @@ function confessProfileDisplayName(profile, pubkey) {
   }
 }
 
-function safeProfileImageMarkup({ imageDataUri, cells, cardX, headerY, scale }) {
+function safeProfileImageMarkup({
+  imageDataUri,
+  cells,
+  cardX,
+  headerY,
+  scale,
+}: {
+  imageDataUri: string | null;
+  cells: string;
+  cardX: number;
+  headerY: number;
+  scale: number;
+}): string {
   const avatarX = cardX + Math.round(42 * scale);
   const avatarY = headerY - Math.round(24 * scale);
   const avatarSize = Math.round(48 * scale);
@@ -119,7 +166,18 @@ function safeProfileImageMarkup({ imageDataUri, cells, cardX, headerY, scale }) 
   return cells;
 }
 
-function confessPostcardSvg({ text, eventId, pubkey, profile, profileImageDataUri, image }) {
+function confessPostcardSvg({
+  text,
+  eventId,
+  pubkey,
+  profile,
+  profileImageDataUri,
+  image,
+}: ConfessPostcardRenderInput & {
+  profile: SvgProfile;
+  profileImageDataUri: string | null;
+  image: ConfessPostcardImageConfig;
+}): string {
   const { width, height } = image;
   const scale = width / 1200;
   const outer = Math.round(78 * scale);
@@ -202,13 +260,13 @@ function confessPostcardSvg({ text, eventId, pubkey, profile, profileImageDataUr
 </svg>`;
 }
 
-function isPrivateIpv4(hostname) {
+function isPrivateIpv4(hostname: string): boolean {
   const parts = hostname.split(".").map((part) => Number(part));
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
     return false;
   }
 
-  const [first, second] = parts;
+  const [first = 0, second = 0] = parts;
   return (
     first === 10 ||
     first === 127 ||
@@ -218,7 +276,7 @@ function isPrivateIpv4(hostname) {
   );
 }
 
-function isSafeProfileImageUrl(value) {
+function isSafeProfileImageUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
     const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -238,8 +296,8 @@ export function createConfessPostcardRenderer({
   image,
   profileImage,
   fetchProfileMetadata,
-}) {
-  async function fetchProfileImageDataUri(url) {
+}: ConfessPostcardRendererOptions) {
+  async function fetchProfileImageDataUri(url: string | undefined): Promise<string | null> {
     if (!url || !isSafeProfileImageUrl(url)) return null;
 
     const controller = new AbortController();
@@ -274,7 +332,9 @@ export function createConfessPostcardRenderer({
     }
   }
 
-  async function resolveProfile(pubkey) {
+  async function resolveProfile(
+    pubkey: string,
+  ): Promise<{ profile: SvgProfile; imageDataUri: string | null }> {
     if (!/^[0-9a-f]{64}$/i.test(String(pubkey || ""))) {
       return { profile: null, imageDataUri: null };
     }
@@ -289,7 +349,11 @@ export function createConfessPostcardRenderer({
     }
   }
 
-  async function render({ text, eventId, pubkey }) {
+  async function render({
+    text,
+    eventId,
+    pubkey,
+  }: ConfessPostcardRenderInput): Promise<ConfessPostcardRenderResult> {
     const { profile, imageDataUri } = await resolveProfile(pubkey);
     const svg = confessPostcardSvg({
       text,
@@ -306,7 +370,10 @@ export function createConfessPostcardRenderer({
       .toBuffer();
     const imageHash = crypto.createHash("sha256").update(buffer).digest("hex");
     if (buffer.byteLength > image.maxBytes) {
-      const error = new Error(`generated X image exceeds ${image.maxBytes} bytes`);
+      const error = new Error(`generated X image exceeds ${image.maxBytes} bytes`) as Error & {
+        imageHash: string;
+        imageBytes: number;
+      };
       error.imageHash = imageHash;
       error.imageBytes = buffer.byteLength;
       throw error;

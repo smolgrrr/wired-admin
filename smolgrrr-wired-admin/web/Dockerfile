@@ -5,10 +5,14 @@ WORKDIR /app
 RUN apk add --no-cache font-dejavu
 
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+RUN npm install
 
-COPY server.js ./server.js
+COPY tsconfig.json tsconfig.admin-client.json ./
+COPY server.ts ./server.ts
+COPY src ./src
 COPY public ./public
+
+RUN npm run build && npm prune --omit=dev
 
 ENV NODE_ENV=production
 EXPOSE 3000

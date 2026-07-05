@@ -1,8 +1,59 @@
 import crypto from "node:crypto";
 import express from "express";
+import type { Application, NextFunction, Request, Response } from "express";
 import { getPublicKey } from "nostr-tools";
+import type {
+  ConfessStatusFromStore,
+  ConfessXStatus,
+  CreateConfessionResponse,
+  HttpError,
+  RelayInfo,
+  RelayStats,
+} from "./contracts/api.js";
+import type { ConfessPostcardRenderResult } from "./confess-postcard-renderer.js";
+import type { FeedSnapshotService } from "./feed-snapshot-service.js";
+import type { ModerationService } from "./moderation.js";
+import type { ConfessStore } from "./contracts/stores.js";
 
-export function registerHttpRoutes(app, deps) {
+type ConfessXConfigForRoutes = {
+  enabled: boolean;
+  dryRun: boolean;
+  accountHandle: string;
+};
+
+type RegisterHttpRoutesDeps = {
+  backendUrl: string;
+  buildConfessXPostText: (content: unknown) => string;
+  confessContentMaxLength: number;
+  confessRelays: string[];
+  confessStoreFile: string;
+  confessXConfig: ConfessXConfigForRoutes;
+  confessXImageHeight: number;
+  confessXImageTemplate: string;
+  confessXImageWidth: number;
+  confessXAuthMode: () => string;
+  confessXConfigured: () => boolean;
+  confessXStatusFromStore: (store: ConfessStore) => ConfessXStatus & Record<string, unknown>;
+  confessStatusFromStore: ConfessStatusFromStore;
+  createConfession: (event: unknown) => Promise<Omit<CreateConfessionResponse, "ok">>;
+  feedSnapshot: FeedSnapshotService;
+  isAdminAuthorized: (req: Request) => boolean;
+  isCronAuthorized: (req: Request) => boolean;
+  moderation: ModerationService;
+  moderationStoreFile: string;
+  parseConfessSecretKey: () => Uint8Array | null;
+  publicDir: string;
+  readConfessStore: () => Promise<ConfessStore>;
+  relayInfo: RelayInfo;
+  renderConfessXImage: (input: {
+    text: string;
+    eventId: string;
+    pubkey: string;
+  }) => Promise<ConfessPostcardRenderResult>;
+  stats: RelayStats;
+};
+
+export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDeps): void {
   const {
     backendUrl,
     buildConfessXPostText,
@@ -30,7 +81,7 @@ export function registerHttpRoutes(app, deps) {
     stats,
   } = deps;
 
-  app.get("/api/status", async (_req, res) => {
+  app.get("/api/status", async (_req: Request, res: Response) => {
     const actions = await moderation.getActions();
     const manifest = moderation.manifestFromActions(actions);
     const confessStore = await readConfessStore();
@@ -61,7 +112,7 @@ export function registerHttpRoutes(app, deps) {
     });
   });
 
-  app.get("/api/feed/bootstrap", async (_req, res) => {
+  app.get("/api/feed/bootstrap", async (_req: Request, res: Response) => {
     res.setHeader("Cache-Control", "public, max-age=120, stale-while-revalidate=300");
     const currentSnapshot = feedSnapshot.current();
     if (currentSnapshot) {
@@ -79,7 +130,7 @@ export function registerHttpRoutes(app, deps) {
     }
   });
 
-  app.get("/api/cron/refresh-feed", async (req, res) => {
+  app.get("/api/cron/refresh-feed", async (req: Request, res: Response) => {
     if (!isCronAuthorized(req)) {
       res.status(401).json({ error: "unauthorized" });
       return;
@@ -98,14 +149,14 @@ export function registerHttpRoutes(app, deps) {
     }
   });
 
-  app.get("/healthz", (_req, res) => {
+  app.get("/healthz", (_req: Request, res: Response) => {
     res.status(feedSnapshot.current() ? 200 : 503).json({
       ok: Boolean(feedSnapshot.current()),
       ...feedSnapshot.status(),
     });
   });
 
-  app.get("/api/confess/status", async (_req, res) => {
+  app.get("/api/confess/status", async (_req: Request, res: Response) => {
     res.setHeader("Cache-Control", "no-store");
     const store = await readConfessStore();
     res.json({
@@ -126,7 +177,7 @@ export function registerHttpRoutes(app, deps) {
     });
   });
 
-  app.get("/api/confess/x-image-preview", async (req, res) => {
+  app.get("/api/confess/x-image-preview", async (req: Request, res: Response) => {
     try {
       const secretKey = parseConfessSecretKey();
       const text = String(
@@ -151,26 +202,27 @@ export function registerHttpRoutes(app, deps) {
     }
   });
 
-  app.post("/api/confess", async (req, res) => {
+  app.post("/api/confess", async (req: Request, res: Response) => {
     try {
       const result = await createConfession(req.body?.event);
       res.status(201).json({ ok: true, ...result });
     } catch (error) {
+      const httpError = error as HttpError;
       const statusCode =
-        typeof error?.statusCode === "number" ? error.statusCode : 500;
+        typeof httpError.statusCode === "number" ? httpError.statusCode : 500;
       res.status(statusCode).json({
         error: error instanceof Error ? error.message : "confess failed",
-        pow: typeof error?.pow === "number" ? error.pow : undefined,
+        pow: typeof httpError.pow === "number" ? httpError.pow : undefined,
       });
     }
   });
 
-  app.get("/api/moderation/manifest", async (_req, res) => {
+  app.get("/api/moderation/manifest", async (_req: Request, res: Response) => {
     res.setHeader("Cache-Control", "public, max-age=15, stale-while-revalidate=45");
     res.json(await moderation.getManifest());
   });
 
-  app.get("/api/moderation/actions", async (req, res) => {
+  app.get("/api/moderation/actions", async (req: Request, res: Response) => {
     if (!isAdminAuthorized(req)) {
       res.status(401).json({ error: "unauthorized" });
       return;
@@ -178,7 +230,7 @@ export function registerHttpRoutes(app, deps) {
     res.json({ actions: await moderation.getActions() });
   });
 
-  app.post("/api/moderation/actions", async (req, res) => {
+  app.post("/api/moderation/actions", async (req: Request, res: Response) => {
     if (!isAdminAuthorized(req)) {
       res.status(401).json({ error: "unauthorized" });
       return;
@@ -197,14 +249,19 @@ export function registerHttpRoutes(app, deps) {
     }
   });
 
-  app.delete("/api/moderation/actions/:id", async (req, res) => {
+  app.delete("/api/moderation/actions/:id", async (req: Request, res: Response) => {
     if (!isAdminAuthorized(req)) {
       res.status(401).json({ error: "unauthorized" });
       return;
     }
 
     try {
-      const action = await moderation.deleteAction(req.params.id);
+      const actionId = req.params.id;
+      if (!actionId) {
+        res.status(404).json({ error: "not found" });
+        return;
+      }
+      const action = await moderation.deleteAction(actionId);
       void feedSnapshot.refresh().catch(() => {
         console.error(feedSnapshot.lastRefreshError() || "moderation refresh failed");
       });
@@ -216,7 +273,7 @@ export function registerHttpRoutes(app, deps) {
     }
   });
 
-  app.get("/", (req, res, next) => {
+  app.get("/", (req: Request, res: Response, next: NextFunction) => {
     const accept = String(req.headers.accept || "");
     if (accept.includes("application/nostr+json")) {
       res.type("application/nostr+json").json(relayInfo);

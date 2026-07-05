@@ -1,7 +1,33 @@
 import crypto from "node:crypto";
 import { withTimeout } from "./utils.js";
 
-function oauthPercentEncode(value) {
+export type XClientConfig = {
+  dryRun: boolean;
+  oauth1ApiKey: string;
+  oauth1ApiSecret: string;
+  oauth1AccessToken: string;
+  oauth1AccessSecret: string;
+};
+
+export type PostTweetInput = {
+  text?: string;
+  inReplyToTweetId?: string | null;
+  mediaIds?: string[];
+};
+
+type TweetRequestBody = {
+  text?: string;
+  reply?: {
+    in_reply_to_tweet_id: string;
+  };
+  media?: {
+    media_ids: string[];
+  };
+};
+
+export type XClient = ReturnType<typeof createXClient>;
+
+function oauthPercentEncode(value: string): string {
   return encodeURIComponent(String(value))
     .replace(/[!'()*]/g, (character) =>
       `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
@@ -12,8 +38,8 @@ function oauthNonce() {
   return crypto.randomBytes(16).toString("base64url");
 }
 
-export function createXClient(config, timeoutMs) {
-  function configured() {
+export function createXClient(config: XClientConfig, timeoutMs: number) {
+  function configured(): boolean {
     return Boolean(
       config.oauth1ApiKey &&
         config.oauth1ApiSecret &&
@@ -22,13 +48,13 @@ export function createXClient(config, timeoutMs) {
     );
   }
 
-  function authMode() {
+  function authMode(): "oauth1" | "dry_run" | "none" {
     if (configured()) return "oauth1";
     if (config.dryRun) return "dry_run";
     return "none";
   }
 
-  function oauth1AuthorizationHeader(method, url) {
+  function oauth1AuthorizationHeader(method: string, url: string): string {
     const oauthParams = {
       oauth_consumer_key: config.oauth1ApiKey,
       oauth_nonce: oauthNonce(),
@@ -69,9 +95,13 @@ export function createXClient(config, timeoutMs) {
       .join(", ")}`;
   }
 
-  async function postTweet({ text = "", inReplyToTweetId = null, mediaIds = [] } = {}) {
+  async function postTweet({
+    text = "",
+    inReplyToTweetId = null,
+    mediaIds = [],
+  }: PostTweetInput = {}): Promise<Response> {
     const url = "https://api.x.com/2/tweets";
-    const body = {};
+    const body: TweetRequestBody = {};
     const trimmedText = String(text || "").trim();
     if (trimmedText) body.text = trimmedText;
     if (inReplyToTweetId) {
@@ -94,7 +124,7 @@ export function createXClient(config, timeoutMs) {
     );
   }
 
-  async function uploadImage(buffer) {
+  async function uploadImage(buffer: Buffer): Promise<Response> {
     const url = "https://api.x.com/2/media/upload";
     const form = new FormData();
     form.append("media_category", "tweet_image");

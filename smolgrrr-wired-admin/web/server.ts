@@ -4,9 +4,21 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import { finalizeEvent, getPublicKey, nip19, Relay } from "nostr-tools";
-import { WebSocketServer } from "ws";
-import { envFlag as readEnvFlag, envList as readEnvList, normalizeHost as normalizeConfiguredHost, readJsonResponse as readHttpJsonResponse, summarizeHttpError, uniqueSorted as uniqueSortedValues, withTimeout as withPromiseTimeout } from "./src/utils.js";
+import type { IncomingMessage } from "node:http";
+import type { Socket } from "node:net";
+import { finalizeEvent, getPublicKey, nip19, Relay, type EventTemplate } from "nostr-tools";
+import { WebSocketServer, type RawData } from "ws";
+import {
+  envFlag as readEnvFlag,
+  envList as readEnvList,
+  normalizeHost as normalizeConfiguredHost,
+  normalizeRelayUrl,
+  readJsonResponse as readHttpJsonResponse,
+  summarizeHttpError,
+  uniqueRelays,
+  uniqueSorted as uniqueSortedValues,
+  withTimeout as withPromiseTimeout,
+} from "./src/utils.js";
 import { verifyPow as verifyEventPow } from "./src/pow.js";
 import { createXClient } from "./src/x-client.js";
 import { createConfessPostcardRenderer } from "./src/confess-postcard-renderer.js";
@@ -15,13 +27,27 @@ import { createFeedSnapshotService } from "./src/feed-snapshot-service.js";
 import { registerHttpRoutes } from "./src/http-routes.js";
 import { createRelayGateway } from "./src/relay-gateway.js";
 import { createHttpAccess } from "./src/http-access.js";
+import type {
+  ConfessStatus,
+  ConfessXStatus,
+  HttpError,
+  PublicConfessXMirror,
+  RelayInfo,
+  RelayRecentActivity,
+  RelayStats,
+} from "./src/contracts/api.js";
+import type { NostrEvent } from "./src/contracts/nostr.js";
+import type { ConfessPostRecord, ConfessStore, ConfessXMirror } from "./src/contracts/stores.js";
+import { isNostrEvent, parseConfessStore } from "./src/contracts/validation.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const appRoot = path.resolve(__dirname, "..");
 
 const port = Number(process.env.PORT || 3000);
 const backendUrl = process.env.RELAY_BACKEND_URL || "ws://relay:7777";
 const minPow = Number(process.env.RELAY_MIN_POW || 16);
-const dataDir = process.env.WIRED_DATA_DIR || path.join(__dirname, "data");
+const dataDir = process.env.WIRED_DATA_DIR || path.join(appRoot, "data");
+const publicDir = path.join(appRoot, "public");
 const snapshotCacheFile =
   process.env.FEED_SNAPSHOT_CACHE_FILE || path.join(dataDir, "feed-bootstrap.json");
 const moderationStoreFile =
@@ -130,14 +156,11 @@ const feedSnapshot = createFeedSnapshotService({
 });
 const publicHostPatterns = readEnvList("PUBLIC_HOSTS", []).map(normalizeConfiguredHost).filter(Boolean);
 
-const relayInfo = {
+const relayInfo: RelayInfo = {
   name: process.env.RELAY_NAME || "Wired Admin",
   description:
     process.env.RELAY_DESCRIPTION ||
     "A Wired proof-of-work Nostr relay backed by strfry.",
-  pubkey: process.env.RELAY_PUBKEY || undefined,
-  contact: process.env.RELAY_CONTACT || undefined,
-  icon: process.env.RELAY_ICON || undefined,
   supported_nips: [1, 9, 11, 13, 15, 20, 22, 33, 40],
   software:
     process.env.RELAY_SOFTWARE ||
@@ -149,6 +172,9 @@ const relayInfo = {
     min_pow_difficulty: minPow,
   },
 };
+if (process.env.RELAY_PUBKEY) relayInfo.pubkey = process.env.RELAY_PUBKEY;
+if (process.env.RELAY_CONTACT) relayInfo.contact = process.env.RELAY_CONTACT;
+if (process.env.RELAY_ICON) relayInfo.icon = process.env.RELAY_ICON;
 
 const securityHeaders = {
   "Content-Security-Policy":
@@ -161,7 +187,7 @@ const securityHeaders = {
 };
 const httpAccess = createHttpAccess({ publicHostPatterns, securityHeaders });
 
-const stats = {
+const stats: RelayStats = {
   startedAt: Date.now(),
   backendUrl,
   minPow,
@@ -181,11 +207,11 @@ const stats = {
   recent: [],
 };
 
-let confessLedgerQueue = Promise.resolve();
-let confessXMirrorTimer = null;
-const confessXMirrorInFlight = new Set();
+let confessLedgerQueue: Promise<unknown> = Promise.resolve();
+let confessXMirrorTimer: NodeJS.Timeout | null = null;
+const confessXMirrorInFlight = new Set<string>();
 
-function addRecent(type, detail) {
+function addRecent(type: string, detail: unknown): void {
   stats.recent.unshift({
     at: Date.now(),
     type,
@@ -201,39 +227,40 @@ const handleClientConnection = createRelayGateway({
   addRecent,
 });
 
-function utcDayKey(timeMs = Date.now()) {
+function utcDayKey(timeMs = Date.now()): string {
   return new Date(timeMs).toISOString().slice(0, 10);
 }
 
-function nextUtcReset(day) {
+function nextUtcReset(day: string): Date {
   return new Date(Date.parse(`${day}T00:00:00.000Z`) + 24 * 60 * 60 * 1000);
 }
 
-async function readConfessStore() {
+async function readConfessStore(): Promise<ConfessStore> {
   try {
     const parsed = JSON.parse(await readFile(confessStoreFile, "utf8"));
-    if (parsed?.version === 1 && Array.isArray(parsed.posts)) return parsed;
+    const store = parseConfessStore(parsed);
+    if (store) return store;
   } catch {
     // Missing or malformed stores are treated as empty.
   }
   return { version: 1, posts: [] };
 }
 
-async function writeConfessStore(data) {
+async function writeConfessStore(data: ConfessStore): Promise<void> {
   await mkdir(path.dirname(confessStoreFile), { recursive: true });
   const temp = `${confessStoreFile}.${process.pid}.tmp`;
   await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   await rename(temp, confessStoreFile);
 }
 
-function todaysConfessPosts(store, now = Date.now()) {
+function todaysConfessPosts(store: ConfessStore, now = Date.now()): ConfessPostRecord[] {
   const day = utcDayKey(now);
   return store.posts
     .filter((post) => post.day === day)
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 
-function adjustedConfessPow(posts, now = Date.now()) {
+function adjustedConfessPow(posts: ConfessPostRecord[], now = Date.now()): number {
   if (posts.length >= confessDailyLimit) return confessMaxPow;
   if (posts.length === 0) return confessBasePow;
 
@@ -247,8 +274,8 @@ function adjustedConfessPow(posts, now = Date.now()) {
 
   let intervalRatio = scheduleRatio;
   if (posts.length > 1) {
-    const first = posts[0].createdAt / 1000;
-    const last = posts[posts.length - 1].createdAt / 1000;
+    const first = (posts[0]?.createdAt ?? now) / 1000;
+    const last = (posts[posts.length - 1]?.createdAt ?? now) / 1000;
     const actualSpacing = Math.max(60, (last - first) / (posts.length - 1));
     intervalRatio = targetSpacing / actualSpacing;
   }
@@ -259,7 +286,7 @@ function adjustedConfessPow(posts, now = Date.now()) {
   return Math.min(confessMaxPow, confessBasePow + adjustment + scarcityAdjustment);
 }
 
-function confessStatusFromStore(store, now = Date.now()) {
+function confessStatusFromStore(store: ConfessStore, now = Date.now()): ConfessStatus {
   const day = utcDayKey(now);
   const posts = todaysConfessPosts(store, now);
   const count = posts.length;
@@ -278,13 +305,13 @@ function confessStatusFromStore(store, now = Date.now()) {
   };
 }
 
-function withConfessLedgerLock(task) {
+function withConfessLedgerLock<T>(task: () => Promise<T>): Promise<T> {
   const run = confessLedgerQueue.then(task, task);
   confessLedgerQueue = run.catch(() => {});
   return run;
 }
 
-function hexToBytes(hex) {
+function hexToBytes(hex: string): Uint8Array {
   if (!/^[0-9a-f]{64}$/i.test(hex)) {
     throw new Error("expected 32-byte hex private key");
   }
@@ -295,7 +322,7 @@ function hexToBytes(hex) {
   return bytes;
 }
 
-function parseConfessSecretKey() {
+function parseConfessSecretKey(): Uint8Array | null {
   const raw = String(process.env.CONFESS_NOSTR_SECRET_KEY || "").trim();
   if (!raw) return null;
 
@@ -314,13 +341,21 @@ function parseConfessSecretKey() {
 const disallowedConfessContentPattern =
   /\b(?:(?:https?|wss?|ftp|ipfs):\/\/|(?:magnet|nostr):|www\.)[^\s<>"')\]]+|\b[a-z0-9.-]+\.(?:app|band|biz|blog|cloud|co|com|dev|fm|gg|info|io|is|land|link|lol|me|media|net|news|online|onion|org|site|social|to|tv|wine|xyz)(?:\/[^\s<>"')\]]*)?|\b[^\s<>"')\]]+\.(?:avif|gif|jpe?g|m4a|mov|mp3|mp4|ogg|png|svg|wav|webm|webp)(?:\?[^\s<>"')\]]*)?/i;
 
-function hasDisallowedConfessContent(content) {
+function hasDisallowedConfessContent(content: unknown): boolean {
   return disallowedConfessContentPattern.test(String(content || ""));
 }
 
-function validateConfessAdmission(event, requiredPow, confessPubkey) {
+type ConfessAdmissionResult =
+  | { ok: true; reason: ""; pow: number }
+  | { ok: false; reason: string; pow: number };
+
+function validateConfessAdmission(
+  event: NostrEvent,
+  requiredPow: number,
+  confessPubkey: string,
+): ConfessAdmissionResult {
   const result = verifyEventPow(event, requiredPow);
-  if (!result.ok) return result;
+  if (!result.ok) return { ok: false, reason: result.reason, pow: result.pow };
 
   if (event.pubkey !== confessPubkey) {
     return { ok: false, reason: "confess proof pubkey does not match account", pow: result.pow };
@@ -350,20 +385,17 @@ function validateConfessAdmission(event, requiredPow, confessPubkey) {
   return { ok: true, reason: "", pow: result.pow };
 }
 
-function buildConfessionEvent(admissionEvent, secretKey) {
-  return finalizeEvent(
-    {
-      kind: admissionEvent.kind,
-      content: admissionEvent.content.trim(),
-      tags: admissionEvent.tags,
-      created_at: admissionEvent.created_at,
-      pubkey: admissionEvent.pubkey,
-    },
-    secretKey,
-  );
+function buildConfessionEvent(admissionEvent: NostrEvent, secretKey: Uint8Array): NostrEvent {
+  const template: EventTemplate = {
+    kind: admissionEvent.kind,
+    content: admissionEvent.content.trim(),
+    tags: admissionEvent.tags,
+    created_at: admissionEvent.created_at,
+  };
+  return finalizeEvent(template, secretKey);
 }
 
-async function publishConfessionEvent(event) {
+async function publishConfessionEvent(event: NostrEvent): Promise<string[]> {
   const results = await Promise.allSettled(
     confessRelays.map(async (url) => {
       const relay = await withPromiseTimeout(Relay.connect(url), confessPublishTimeoutMs, url);
@@ -387,37 +419,37 @@ async function publishConfessionEvent(event) {
   );
 }
 
-function confessXConfigured() {
+function confessXConfigured(): boolean {
   return Boolean(confessXConfig.dryRun || confessXClient.configured());
 }
 
-function confessXOAuth1Configured() {
+function confessXOAuth1Configured(): boolean {
   return confessXClient.configured();
 }
 
-function confessXAuthMode() {
+function confessXAuthMode(): string {
   return confessXClient.authMode();
 }
 
-function normalizeConfessXText(content) {
+function normalizeConfessXText(content: unknown): string {
   return String(content || "")
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function hashConfessXText(text) {
+function hashConfessXText(text: string): string {
   return crypto.createHash("sha256").update(normalizeConfessXText(text)).digest("hex");
 }
 
-function joinConfessXText(parts) {
+function joinConfessXText(parts: unknown[]): string {
   return parts
     .map((part) => String(part || "").trim())
     .filter(Boolean)
     .join("\n\n");
 }
 
-function buildConfessXPostText(content) {
+function buildConfessXPostText(content: unknown): string {
   return joinConfessXText([
     confessXConfig.postPrefix,
     String(content || "").trim(),
@@ -425,13 +457,22 @@ function buildConfessXPostText(content) {
   ]);
 }
 
-function buildConfessXTweetText() {
+function buildConfessXTweetText(): string {
   return "";
 }
 
-let confessPostcardRenderer = null;
+type ConfessPostcardRenderer = ReturnType<typeof createConfessPostcardRenderer>;
+let confessPostcardRenderer: ConfessPostcardRenderer | null = null;
 
-async function renderConfessXImage({ text, eventId, pubkey }) {
+async function renderConfessXImage({
+  text,
+  eventId,
+  pubkey,
+}: {
+  text: string;
+  eventId: string;
+  pubkey: string;
+}) {
   confessPostcardRenderer ??= createConfessPostcardRenderer({
     image: {
       width: confessXImageWidth,
@@ -469,7 +510,15 @@ const xSexualMinorPattern =
 const xScamPattern =
   /\b(?:send\s+crypto|seed phrase|private key|guaranteed\s+(?:profit|returns)|double your money|pump and dump|buy followers)\b/i;
 
-function validateConfessXSafety(text, store, eventId) {
+type ConfessXSafetyResult =
+  | { ok: true; reason: ""; textHash: string }
+  | { ok: false; reason: string };
+
+function validateConfessXSafety(
+  text: string,
+  store: ConfessStore,
+  eventId: string,
+): ConfessXSafetyResult {
   const content = String(text || "").trim();
   if (!content) return { ok: false, reason: "empty X post" };
   if (content.length > confessXMaxLength) {
@@ -515,13 +564,13 @@ function validateConfessXSafety(text, store, eventId) {
   return { ok: true, reason: "", textHash };
 }
 
-function initialConfessXMirror(event, store) {
+function initialConfessXMirror(event: NostrEvent, store: ConfessStore): ConfessXMirror {
   const now = Date.now();
   const text = buildConfessXPostText(event.content);
   const base = {
     enabled: confessXConfig.enabled,
     dryRun: confessXConfig.dryRun,
-    postMode: "image",
+    postMode: "image" as const,
     accountHandle: confessXConfig.accountHandle || null,
     threadUrl: confessXThreadUrl(event.id, event.pubkey),
     updatedAt: now,
@@ -561,15 +610,31 @@ function initialConfessXMirror(event, store) {
   };
 }
 
-function nextConfessXAttemptAt(attempts) {
+function nextConfessXAttemptAt(attempts: number): number {
   const delay = confessXRetrySeconds * 1000 * 2 ** Math.max(0, attempts - 1);
   return Date.now() + Math.min(delay, 24 * 60 * 60 * 1000);
 }
 
-function failedConfessXMirror(existing, reason, retryable, patch = {}) {
+function failedConfessXMirror(
+  existing: Partial<ConfessXMirror> | undefined,
+  reason: string,
+  retryable: boolean,
+  patch: Partial<ConfessXMirror> = {},
+): ConfessXMirror {
   const attempts = Number(existing?.attempts || 0) + 1;
   const canRetry = Boolean(retryable && attempts < confessXMaxAttempts);
+  const base: ConfessXMirror = {
+    enabled: confessXConfig.enabled,
+    dryRun: confessXConfig.dryRun,
+    postMode: "image",
+    accountHandle: confessXConfig.accountHandle || null,
+    threadUrl: existing?.threadUrl || "",
+    updatedAt: Date.now(),
+    status: "failed",
+    reason,
+  };
   return {
+    ...base,
     ...existing,
     ...patch,
     status: "failed",
@@ -581,10 +646,10 @@ function failedConfessXMirror(existing, reason, retryable, patch = {}) {
   };
 }
 
-function confessXThreadRef(eventId, pubkey = "") {
+function confessXThreadRef(eventId: string, pubkey = ""): string {
   if (!/^[0-9a-f]{64}$/i.test(String(eventId || ""))) return String(eventId || "");
 
-  const pointer = {
+  const pointer: { id: string; relays: string[]; author?: string } = {
     id: eventId,
     relays: uniqueRelays(confessXThreadRelays),
   };
@@ -592,17 +657,32 @@ function confessXThreadRef(eventId, pubkey = "") {
   return nip19.neventEncode(pointer);
 }
 
-function confessXThreadUrl(eventId, pubkey = "") {
+function confessXThreadUrl(eventId: string, pubkey = ""): string {
   return `${confessXThreadBaseUrl}/${encodeURIComponent(confessXThreadRef(eventId, pubkey))}`;
 }
 
-function buildConfessXThreadReplyText(eventId, pubkey = "") {
+function buildConfessXThreadReplyText(eventId: string, pubkey = ""): string {
   return `thread: ${confessXThreadUrl(eventId, pubkey)}`;
 }
 
-async function postConfessXText(text, existingMirror, eventId) {
+type XApiPayload = {
+  data?: {
+    id?: string;
+  };
+};
+
+type ImageRenderError = Error & {
+  imageHash?: string;
+  imageBytes?: number;
+};
+
+async function postConfessXText(
+  text: string,
+  existingMirror: ConfessXMirror,
+  eventId: string,
+): Promise<ConfessXMirror> {
   if (confessXConfig.dryRun) {
-    const dryRunPatch = {};
+    const dryRunPatch: Partial<ConfessXMirror> = {};
     try {
       const rendered = await renderConfessXImage({
         text,
@@ -637,7 +717,7 @@ async function postConfessXText(text, existingMirror, eventId) {
   }
 
   let mediaId = existingMirror?.mediaId || null;
-  let imagePatch = {};
+  let imagePatch: Partial<ConfessXMirror> = {};
   if (!mediaId) {
     try {
       const rendered = await renderConfessXImage({
@@ -653,7 +733,7 @@ async function postConfessXText(text, existingMirror, eventId) {
         imageTemplate: rendered.template,
       };
       const uploadResponse = await confessXClient.uploadImage(rendered.buffer);
-      const uploadPayload = await readHttpJsonResponse(uploadResponse);
+      const uploadPayload = (await readHttpJsonResponse(uploadResponse)) as XApiPayload | null;
       if (!uploadResponse.ok || !uploadPayload?.data?.id) {
         const reason = `X media upload failed (${uploadResponse.status}): ${summarizeHttpError(uploadPayload)}`;
         const retryable = uploadResponse.status === 429 || uploadResponse.status >= 500;
@@ -665,11 +745,13 @@ async function postConfessXText(text, existingMirror, eventId) {
     } catch (error) {
       const reason =
         error instanceof Error ? `X image render/upload failed: ${error.message}` : "X image render/upload failed";
-      return failedConfessXMirror(existingMirror, reason, true, {
-        ...imagePatch,
-        imageHash: error?.imageHash || imagePatch.imageHash,
-        imageBytes: error?.imageBytes || imagePatch.imageBytes,
-      });
+      const renderError = error as Partial<ImageRenderError>;
+      const failurePatch: Partial<ConfessXMirror> = { ...imagePatch };
+      const imageHash = renderError.imageHash || imagePatch.imageHash;
+      if (imageHash) failurePatch.imageHash = imageHash;
+      const imageBytes = renderError.imageBytes || imagePatch.imageBytes;
+      if (typeof imageBytes === "number") failurePatch.imageBytes = imageBytes;
+      return failedConfessXMirror(existingMirror, reason, true, failurePatch);
     }
   }
 
@@ -680,7 +762,7 @@ async function postConfessXText(text, existingMirror, eventId) {
       text: buildConfessXTweetText(),
       mediaIds: mediaId ? [mediaId] : [],
     });
-    const payload = await readHttpJsonResponse(response);
+    const payload = (await readHttpJsonResponse(response)) as XApiPayload | null;
     if (!response.ok || !payload?.data?.id) {
       const reason = `X post failed (${response.status}): ${summarizeHttpError(payload)}`;
       const retryable = response.status === 429 || response.status >= 500;
@@ -695,9 +777,9 @@ async function postConfessXText(text, existingMirror, eventId) {
     text: threadReplyText,
     inReplyToTweetId: tweetId,
   });
-  const replyPayload = await readHttpJsonResponse(replyResponse);
+  const replyPayload = (await readHttpJsonResponse(replyResponse)) as XApiPayload | null;
   if (replyResponse.ok && replyPayload?.data?.id) {
-    return {
+    const postedMirror: ConfessXMirror = {
       ...existingMirror,
       ...imagePatch,
       status: "posted",
@@ -705,7 +787,6 @@ async function postConfessXText(text, existingMirror, eventId) {
       retryable: false,
       attempts: Number(existingMirror?.attempts || 0) + 1,
       postMode: "image",
-      mediaId: mediaId || undefined,
       tweetId,
       replyTweetId: replyPayload.data.id,
       threadUrl: confessXThreadUrl(eventId, existingMirror?.pubkey),
@@ -714,32 +795,41 @@ async function postConfessXText(text, existingMirror, eventId) {
       repliedAt: Date.now(),
       updatedAt: Date.now(),
     };
+    if (mediaId) postedMirror.mediaId = mediaId;
+    return postedMirror;
   }
 
   const reason = `X thread reply failed (${replyResponse.status}): ${summarizeHttpError(replyPayload)}`;
   const retryable = replyResponse.status === 429 || replyResponse.status >= 500;
-  return failedConfessXMirror(existingMirror, reason, retryable, {
+  const failedReplyPatch: Partial<ConfessXMirror> = {
     ...imagePatch,
     postMode: "image",
-    mediaId: mediaId || undefined,
     tweetId,
     threadUrl: confessXThreadUrl(eventId, existingMirror?.pubkey),
     postedAt,
-  });
+  };
+  if (mediaId) failedReplyPatch.mediaId = mediaId;
+  return failedConfessXMirror(existingMirror, reason, retryable, failedReplyPatch);
 }
 
-async function updateConfessXMirror(eventId, updater) {
+async function updateConfessXMirror(
+  eventId: string,
+  updater: (current: ConfessXMirror | undefined) => Promise<ConfessXMirror> | ConfessXMirror,
+): Promise<ConfessXMirror | null> {
   return withConfessLedgerLock(async () => {
     const store = await readConfessStore();
     const post = store.posts.find((candidate) => candidate.eventId === eventId);
     if (!post) return null;
-    post.xMirror = await updater(post.xMirror || {});
+    post.xMirror = await updater(post.xMirror);
     await writeConfessStore(store);
     return post.xMirror;
   });
 }
 
-async function processConfessXMirror(eventId, mirror) {
+async function processConfessXMirror(
+  eventId: string,
+  mirror: ConfessXMirror | undefined,
+): Promise<ConfessXMirror | null | undefined> {
   if (!mirror || !["pending", "failed"].includes(mirror.status)) return mirror;
   if (!mirror.retryable || Number(mirror.nextAttemptAt || 0) > Date.now()) return mirror;
   if (!mirror.text) {
@@ -762,7 +852,7 @@ async function processConfessXMirror(eventId, mirror) {
   }
 }
 
-function scheduleConfessXMirror(eventId, mirror) {
+function scheduleConfessXMirror(eventId: string, mirror: ConfessXMirror | undefined): void {
   if (!confessXConfig.enabled) return;
   if (!mirror || !["pending", "failed"].includes(mirror.status)) return;
   const timer = setTimeout(() => {
@@ -773,13 +863,13 @@ function scheduleConfessXMirror(eventId, mirror) {
   timer.unref();
 }
 
-async function processPendingConfessXMirrors() {
+async function processPendingConfessXMirrors(): Promise<void> {
   if (!confessXConfig.enabled) return;
   const store = await readConfessStore();
   const duePosts = (store.posts || []).filter(
     (post) =>
       post.eventId &&
-      ["pending", "failed"].includes(post.xMirror?.status) &&
+      (post.xMirror?.status === "pending" || post.xMirror?.status === "failed") &&
       post.xMirror?.retryable !== false &&
       Number(post.xMirror?.nextAttemptAt || 0) <= Date.now(),
   );
@@ -788,7 +878,14 @@ async function processPendingConfessXMirrors() {
   }
 }
 
-function confessXStatusFromStore(store) {
+function confessXStatusFromStore(store: ConfessStore): ConfessXStatus & {
+  safetyMode: string;
+  maxLength: number;
+  retrySeconds: number;
+  maxAttempts: number;
+  threadBaseUrl: string;
+  counts: Record<ConfessXMirror["status"], number>;
+} {
   const counts = {
     disabled: 0,
     pending: 0,
@@ -799,7 +896,7 @@ function confessXStatusFromStore(store) {
   };
   for (const post of store.posts || []) {
     const status = post.xMirror?.status;
-    if (Object.hasOwn(counts, status)) counts[status] += 1;
+    if (status && Object.hasOwn(counts, status)) counts[status] += 1;
   }
   return {
     enabled: confessXConfig.enabled,
@@ -823,29 +920,36 @@ function confessXStatusFromStore(store) {
   };
 }
 
-function publicConfessXMirror(mirror) {
+function publicConfessXMirror(mirror: ConfessXMirror | undefined): PublicConfessXMirror {
   if (!mirror) return { status: "disabled" };
-  return {
+  const result: PublicConfessXMirror = {
     status: mirror.status,
-    reason: mirror.reason || undefined,
-    tweetId: mirror.tweetId || undefined,
-    replyTweetId: mirror.replyTweetId || undefined,
-    threadUrl: mirror.threadUrl || undefined,
-    postMode: mirror.postMode || undefined,
-    imageHash: mirror.imageHash || undefined,
-    imageBytes: mirror.imageBytes || undefined,
-    retryable: mirror.retryable,
-    attempts: mirror.attempts,
-    nextAttemptAt: mirror.nextAttemptAt,
-    accountHandle: mirror.accountHandle || undefined,
   };
+  if (mirror.reason) result.reason = mirror.reason;
+  if (mirror.tweetId) result.tweetId = mirror.tweetId;
+  if (mirror.replyTweetId) result.replyTweetId = mirror.replyTweetId;
+  if (mirror.threadUrl) result.threadUrl = mirror.threadUrl;
+  if (mirror.postMode) result.postMode = mirror.postMode;
+  if (mirror.imageHash) result.imageHash = mirror.imageHash;
+  if (typeof mirror.imageBytes === "number") result.imageBytes = mirror.imageBytes;
+  if (typeof mirror.retryable === "boolean") result.retryable = mirror.retryable;
+  if (typeof mirror.attempts === "number") result.attempts = mirror.attempts;
+  if (mirror.nextAttemptAt !== undefined) result.nextAttemptAt = mirror.nextAttemptAt;
+  if (mirror.accountHandle) result.accountHandle = mirror.accountHandle;
+  return result;
 }
 
-async function createConfession(admissionEvent) {
+async function createConfession(admissionEvent: unknown) {
   const secretKey = parseConfessSecretKey();
   if (!secretKey) {
-    const error = new Error("confess account is not configured");
+    const error: HttpError = new Error("confess account is not configured");
     error.statusCode = 503;
+    throw error;
+  }
+
+  if (!isNostrEvent(admissionEvent)) {
+    const error: HttpError = new Error("invalid confession proof event");
+    error.statusCode = 400;
     throw error;
   }
 
@@ -854,13 +958,13 @@ async function createConfession(admissionEvent) {
     const status = confessStatusFromStore(store);
 
     if (status.closed) {
-      const error = new Error("daily confess cap reached");
+      const error: HttpError = new Error("daily confess cap reached");
       error.statusCode = 429;
       throw error;
     }
 
     if (store.posts.some((post) => post.proofId === admissionEvent?.id)) {
-      const error = new Error("confess proof has already been used");
+      const error: HttpError = new Error("confess proof has already been used");
       error.statusCode = 409;
       throw error;
     }
@@ -868,7 +972,7 @@ async function createConfession(admissionEvent) {
     const confessPubkey = getPublicKey(secretKey);
     const proof = validateConfessAdmission(admissionEvent, status.minimumPow, confessPubkey);
     if (!proof.ok) {
-      const error = new Error(proof.reason);
+      const error: HttpError = new Error(proof.reason);
       error.statusCode = 400;
       error.pow = proof.pow;
       throw error;
@@ -877,7 +981,7 @@ async function createConfession(admissionEvent) {
     const event = buildConfessionEvent(admissionEvent, secretKey);
     const acceptedRelays = await publishConfessionEvent(event);
     if (acceptedRelays.length === 0) {
-      const error = new Error("no relay accepted the confession");
+      const error: HttpError = new Error("no relay accepted the confession");
       error.statusCode = 502;
       throw error;
     }
@@ -942,14 +1046,14 @@ registerHttpRoutes(app, {
   moderation,
   moderationStoreFile,
   parseConfessSecretKey,
-  publicDir: path.join(__dirname, "public"),
+  publicDir,
   readConfessStore,
   relayInfo,
   renderConfessXImage,
   stats,
 });
 
-server.on("upgrade", (request, socket, head) => {
+server.on("upgrade", (request: IncomingMessage, socket: Socket, head: Buffer) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
   if (url.pathname !== "/" && url.pathname !== "/relay") {
     socket.destroy();
