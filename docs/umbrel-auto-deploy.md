@@ -2,47 +2,42 @@
 
 Wired Admin deploys from GitHub Actions after the web image publish job succeeds on a push to `main`.
 
-The deploy path intentionally avoids Umbrel's app update hook. It SSHes to the Umbrel host, fast-forwards the app-store checkout, updates only the installed `services.web.image` and `services.web.environment.RELAY_VERSION`, copies the packaged `umbrel-app.yml`, restarts the app through `umbreld client apps.restart.mutate`, then runs smoke checks.
+The deploy job runs on a self-hosted GitHub Actions runner installed on the Umbrel host with these labels:
 
-## Required GitHub Secrets
+- `self-hosted`
+- `umbrel`
+- `wired-admin`
 
-Configure these repository secrets:
+The deploy path intentionally avoids Umbrel's app update hook. It fast-forwards the app-store checkout on the host, updates only the installed `services.web.image` and `services.web.environment.RELAY_VERSION`, copies the packaged `umbrel-app.yml`, restarts the app through `umbreld client apps.restart.mutate`, then runs smoke checks.
 
-- `UMBREL_DEPLOY_SSH_HOST`: Umbrel host or IP reachable from GitHub Actions.
-- `UMBREL_DEPLOY_SSH_USER`: SSH user on the Umbrel host.
-- `UMBREL_DEPLOY_SSH_KEY`: Private key for that SSH user.
+## Required Host Setup
 
-Recommended:
+Install a repository-scoped self-hosted runner for `smolgrrr/wired-admin` on the Umbrel host and assign the labels `umbrel` and `wired-admin`.
 
-- `UMBREL_DEPLOY_SSH_KNOWN_HOSTS`: The host key line for strict SSH host verification. If omitted, the workflow uses `ssh-keyscan` during the run.
+The runner user must be able to run:
 
-Optional:
+- `git`
+- `node`
+- `umbreld`
 
-- `UMBREL_DEPLOY_SSH_PORT`: SSH port, default `22`.
+The runner user must also be able to write the installed app data files:
+
+- `/home/umbrel/umbrel/app-data/smolgrrr-wired-admin/docker-compose.yml`
+- `/home/umbrel/umbrel/app-data/smolgrrr-wired-admin/umbrel-app.yml`
+- `/home/umbrel/umbrel/app-data/smolgrrr-wired-admin/backups/`
+
+The runner should run only trusted deploy jobs from `main`. Do not run pull request workflows on this runner for a public repo.
+
+## Optional GitHub Repository Variables
+
+The workflow has working defaults for this host. Configure these repository variables only if paths or smoke URLs change:
+
 - `UMBREL_DEPLOY_UMBREL_DIR`: Umbrel data directory, default `/home/umbrel/umbrel`.
-- `UMBREL_DEPLOY_REPO_DIR`: Exact app-store checkout path if auto-discovery is not enough.
-- `UMBREL_DEPLOY_PUBLIC_BASE_URL`: Public base URL. When set, the deploy checks `/api/confess/status` and `/api/feed/bootstrap`.
+- `UMBREL_DEPLOY_REPO_DIR`: App-store checkout path, default `/home/umbrel/dev/wired-pow-relay-app`.
+- `UMBREL_DEPLOY_PUBLIC_BASE_URL`: Public base URL, default `https://wiredsignal.online`.
 - `UMBREL_DEPLOY_PUBLIC_SMOKE_URLS`: Explicit comma- or whitespace-separated public URLs to check instead of deriving them from `UMBREL_DEPLOY_PUBLIC_BASE_URL`.
 
-If any required SSH secret is absent, the deploy job exits successfully with a notice and does not contact the server.
-
-## One-Time Host Setup
-
-1. Install the public key matching `UMBREL_DEPLOY_SSH_KEY` for the deploy user.
-2. Make sure that user can run `git`, `node`, and `umbreld`.
-3. Make sure the deploy user can write the installed app data files:
-   - `/home/umbrel/umbrel/app-data/smolgrrr-wired-admin/docker-compose.yml`
-   - `/home/umbrel/umbrel/app-data/smolgrrr-wired-admin/umbrel-app.yml`
-   - `/home/umbrel/umbrel/app-data/smolgrrr-wired-admin/backups/`
-4. Make sure the deploy user can fast-forward the app-store checkout that contains `smolgrrr-wired-admin`.
-
-The default checkout discovery searches:
-
-- `/home/umbrel/umbrel/app-stores/*`
-- `/home/umbrel/umbrel/repos/*`
-- the remote SSH working directory
-
-Set `UMBREL_DEPLOY_REPO_DIR` if the checkout lives somewhere else.
+No SSH deploy secrets are required for the self-hosted runner path.
 
 ## Manual Host Run
 
@@ -56,7 +51,7 @@ Useful overrides:
 
 ```sh
 UMBREL_DIR=/home/umbrel/umbrel \
-WIRED_ADMIN_APP_STORE_DIR=/home/umbrel/umbrel/app-stores/smolgrrr-wired-admin-github-957d0d1c \
+WIRED_ADMIN_APP_STORE_DIR=/home/umbrel/dev/wired-pow-relay-app \
 WIRED_ADMIN_PUBLIC_BASE_URL=https://wiredsignal.online \
 node scripts/deploy-wired-admin-umbrel.mjs
 ```
