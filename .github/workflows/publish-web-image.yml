@@ -48,3 +48,109 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    name: Deploy to Umbrel
+    runs-on: ubuntu-latest
+    needs: publish
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    env:
+      UMBREL_DEPLOY_SSH_HOST: ${{ secrets.UMBREL_DEPLOY_SSH_HOST }}
+      UMBREL_DEPLOY_SSH_USER: ${{ secrets.UMBREL_DEPLOY_SSH_USER }}
+      UMBREL_DEPLOY_SSH_KEY: ${{ secrets.UMBREL_DEPLOY_SSH_KEY }}
+      UMBREL_DEPLOY_SSH_PORT: ${{ secrets.UMBREL_DEPLOY_SSH_PORT }}
+      UMBREL_DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.UMBREL_DEPLOY_SSH_KNOWN_HOSTS }}
+      UMBREL_DEPLOY_UMBREL_DIR: ${{ secrets.UMBREL_DEPLOY_UMBREL_DIR }}
+      UMBREL_DEPLOY_REPO_DIR: ${{ secrets.UMBREL_DEPLOY_REPO_DIR }}
+      UMBREL_DEPLOY_PUBLIC_BASE_URL: ${{ secrets.UMBREL_DEPLOY_PUBLIC_BASE_URL }}
+      UMBREL_DEPLOY_PUBLIC_SMOKE_URLS: ${{ secrets.UMBREL_DEPLOY_PUBLIC_SMOKE_URLS }}
+    steps:
+      - name: Check deploy configuration
+        id: deploy-config
+        shell: bash
+        run: |
+          if [[ -z "${UMBREL_DEPLOY_SSH_HOST}" || -z "${UMBREL_DEPLOY_SSH_USER}" || -z "${UMBREL_DEPLOY_SSH_KEY}" ]]; then
+            echo "::notice::Skipping Umbrel deploy because UMBREL_DEPLOY_SSH_HOST, UMBREL_DEPLOY_SSH_USER, or UMBREL_DEPLOY_SSH_KEY is not configured."
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Configure SSH
+        if: ${{ steps.deploy-config.outputs.enabled == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.ssh"
+          chmod 700 "${HOME}/.ssh"
+          printf '%s\n' "${UMBREL_DEPLOY_SSH_KEY}" > "${HOME}/.ssh/umbrel_deploy_key"
+          chmod 600 "${HOME}/.ssh/umbrel_deploy_key"
+
+          port="${UMBREL_DEPLOY_SSH_PORT:-22}"
+          if [[ -n "${UMBREL_DEPLOY_SSH_KNOWN_HOSTS}" ]]; then
+            printf '%s\n' "${UMBREL_DEPLOY_SSH_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+          else
+            ssh-keyscan -p "${port}" -H "${UMBREL_DEPLOY_SSH_HOST}" > "${HOME}/.ssh/known_hosts"
+          fi
+          chmod 600 "${HOME}/.ssh/known_hosts"
+
+      - name: Deploy on Umbrel host
+        if: ${{ steps.deploy-config.outputs.enabled == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          port="${UMBREL_DEPLOY_SSH_PORT:-22}"
+          target="${UMBREL_DEPLOY_SSH_USER}@${UMBREL_DEPLOY_SSH_HOST}"
+          remote_command="env"
+          append_remote_env() {
+            local name="$1"
+            local value="$2"
+            local quoted
+            if [[ -n "${value}" ]]; then
+              printf -v quoted '%q' "${value}"
+              remote_command+=" ${name}=${quoted}"
+            fi
+          }
+
+          append_remote_env "UMBREL_DIR" "${UMBREL_DEPLOY_UMBREL_DIR}"
+          append_remote_env "WIRED_ADMIN_APP_STORE_DIR" "${UMBREL_DEPLOY_REPO_DIR}"
+          append_remote_env "WIRED_ADMIN_PUBLIC_BASE_URL" "${UMBREL_DEPLOY_PUBLIC_BASE_URL}"
+          append_remote_env "WIRED_ADMIN_PUBLIC_SMOKE_URLS" "${UMBREL_DEPLOY_PUBLIC_SMOKE_URLS}"
+          remote_command+=" bash -se"
+
+          ssh -i "${HOME}/.ssh/umbrel_deploy_key" -p "${port}" \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${target}" "${remote_command}" <<'REMOTE'
+          set -Eeuo pipefail
+
+          : "${UMBREL_DIR:=/home/umbrel/umbrel}"
+          : "${WIRED_ADMIN_APP_ID:=smolgrrr-wired-admin}"
+
+          repo_dir="${WIRED_ADMIN_APP_STORE_DIR:-}"
+          if [[ -z "${repo_dir}" ]]; then
+            for base in "${UMBREL_DIR}/app-stores" "${UMBREL_DIR}/repos" "${PWD}"; do
+              [[ -d "${base}" ]] || continue
+              for candidate in "${base}" "${base}"/*; do
+                [[ -e "${candidate}" ]] || continue
+                if [[ -d "${candidate}/.git" && -f "${candidate}/${WIRED_ADMIN_APP_ID}/umbrel-app.yml" ]]; then
+                  repo_dir="${candidate}"
+                  break 2
+                fi
+              done
+            done
+          fi
+
+          if [[ -z "${repo_dir}" ]]; then
+            echo "Could not find Wired Admin app-store checkout. Set UMBREL_DEPLOY_REPO_DIR." >&2
+            exit 1
+          fi
+
+          cd "${repo_dir}"
+          git fetch origin main --prune
+          git checkout main
+          git pull --ff-only origin main
+          node scripts/deploy-wired-admin-umbrel.mjs
+          REMOTE
