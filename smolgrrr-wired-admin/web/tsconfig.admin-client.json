@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": [],
+    "rootDir": "src",
+    "outDir": "dist-admin-client",
+    "noEmit": false
+  },
+  "include": ["src/admin-client/**/*.ts", "src/contracts/**/*.ts"],
+  "exclude": ["dist", "dist-admin-client", "node_modules"]
+}

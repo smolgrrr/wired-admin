@@ -1,6 +1,16 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { normalizeUrl, uniqueSorted } from "./utils.js";
+import type { ModerationManifest } from "./contracts/api.js";
+import type { NostrEvent } from "./contracts/nostr.js";
+import type {
+  ModerationAction,
+  ModerationActionInput,
+  ModerationActionKind,
+  ModerationReason,
+  ModerationStore,
+} from "./contracts/stores.js";
+import { isNostrEvent, parseModerationStore } from "./contracts/validation.js";
 
 const emptyModerationManifest = {
   updatedAt: 0,
@@ -15,7 +25,7 @@ const httpUrlPattern = /https?:\/\/[^\s<>"')\]]+/gi;
 const mediaExtensionPattern =
   /\.(?:jpe?g|png|gif|webp|mp4|webm|mov|mp3|wav|ogg|m4a)(?:\?|$)/i;
 
-function imetaUrls(event) {
+function imetaUrls(event: NostrEvent): string[] {
   return (event.tags || [])
     .filter((tag) => tag[0] === "imeta")
     .flatMap((tag) =>
@@ -26,14 +36,14 @@ function imetaUrls(event) {
     );
 }
 
-function eventUrls(event) {
+function eventUrls(event: NostrEvent): string[] {
   const contentUrls = [...String(event.content || "").matchAll(httpUrlPattern)].map(
     (match) => match[0],
   );
   return uniqueSorted([...contentUrls, ...imetaUrls(event)].map(normalizeUrl));
 }
 
-function domainFromUrl(value) {
+function domainFromUrl(value: string): string | null {
   const normalized = normalizeUrl(value);
   if (!normalized) return null;
   try {
@@ -43,11 +53,11 @@ function domainFromUrl(value) {
   }
 }
 
-function mediaUrlsFromEvent(event) {
+function mediaUrlsFromEvent(event: NostrEvent): string[] {
   return uniqueSorted(eventUrls(event).filter((url) => mediaExtensionPattern.test(url)));
 }
 
-function parsedRepostEvent(event) {
+function parsedRepostEvent(event: NostrEvent): NostrEvent | null {
   if (event.kind !== 6) return null;
   try {
     const parsed = JSON.parse(event.content);
@@ -62,22 +72,24 @@ function parsedRepostEvent(event) {
     ) {
       return null;
     }
-    return parsed;
+    return isNostrEvent(parsed) ? parsed : null;
   } catch {
     return null;
   }
 }
 
-function visibleEventVariants(event) {
+function visibleEventVariants(event: NostrEvent): NostrEvent[] {
   const repost = parsedRepostEvent(event);
   return repost ? [event, repost] : [event];
 }
 
-function rootReferences(event) {
-  return (event.tags || []).filter((tag) => tag[0] === "e" && tag[1]).map((tag) => tag[1]);
+function rootReferences(event: NostrEvent): string[] {
+  return (event.tags || [])
+    .filter((tag): tag is [string, string, ...string[]] => tag[0] === "e" && Boolean(tag[1]))
+    .map((tag) => tag[1]);
 }
 
-function normalizeContentForFingerprint(content) {
+function normalizeContentForFingerprint(content: unknown): string {
   return String(content || "")
     .replace(httpUrlPattern, "")
     .replace(/\s+/g, " ")
@@ -85,7 +97,7 @@ function normalizeContentForFingerprint(content) {
     .toLowerCase();
 }
 
-function contentFingerprint(content) {
+function contentFingerprint(content: unknown): string {
   const normalized = normalizeContentForFingerprint(content);
   let hash = 0x811c9dc5;
   for (let index = 0; index < normalized.length; index += 1) {
@@ -95,7 +107,7 @@ function contentFingerprint(content) {
   return `fnv1a:${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
-function normalizeModerationValue(kind, value) {
+function normalizeModerationValue(kind: ModerationActionKind, value: unknown): string | null {
   const trimmed = String(value || "").trim();
   if (!trimmed) return null;
 
@@ -104,7 +116,7 @@ function normalizeModerationValue(kind, value) {
       trimmed
         .replace(/^https?:\/\//i, "")
         .replace(/^www\./i, "")
-        .split("/")[0]
+        .split("/")[0] || ""
         .trim()
         .toLowerCase() || null
     );
@@ -121,37 +133,40 @@ function normalizeModerationValue(kind, value) {
   return trimmed.toLowerCase();
 }
 
-export function createModerationService(storeFile) {
-  async function readStore() {
+export type ModerationService = ReturnType<typeof createModerationService>;
+
+export function createModerationService(storeFile: string) {
+  async function readStore(): Promise<ModerationStore> {
     try {
       const parsed = JSON.parse(await readFile(storeFile, "utf8"));
-      if (parsed?.version === 1 && Array.isArray(parsed.actions)) return parsed;
+      const store = parseModerationStore(parsed);
+      if (store) return store;
     } catch {
       // Missing or malformed stores are treated as empty.
     }
     return { version: 1, actions: [] };
   }
 
-  async function writeStore(data) {
+  async function writeStore(data: ModerationStore): Promise<void> {
     await mkdir(path.dirname(storeFile), { recursive: true });
     const temp = `${storeFile}.${process.pid}.tmp`;
     await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
     await rename(temp, storeFile);
   }
 
-  async function getActions() {
+  async function getActions(): Promise<ModerationAction[]> {
     const store = await readStore();
     return [...store.actions].sort((a, b) => b.createdAt - a.createdAt);
   }
 
-  function manifestFromActions(actions) {
+  function manifestFromActions(actions: ModerationAction[]): ModerationManifest {
     if (actions.length === 0) return emptyModerationManifest;
 
-    const blockedEventIds = new Set();
-    const blockedThreadRoots = new Set();
-    const blockedMediaUrls = new Set();
-    const blockedDomains = new Set();
-    const blockedContentFingerprints = new Set();
+    const blockedEventIds = new Set<string>();
+    const blockedThreadRoots = new Set<string>();
+    const blockedMediaUrls = new Set<string>();
+    const blockedDomains = new Set<string>();
+    const blockedContentFingerprints = new Set<string>();
 
     for (const action of actions) {
       const normalized = normalizeModerationValue(action.kind, action.value);
@@ -182,15 +197,15 @@ export function createModerationService(storeFile) {
     return manifestFromActions((await readStore()).actions);
   }
 
-  async function createAction(input) {
-    const actionKinds = new Set([
+  async function createAction(input: ModerationActionInput): Promise<ModerationAction> {
+    const actionKinds = new Set<ModerationActionKind>([
       "block_event",
       "block_thread",
       "block_media_url",
       "block_domain",
       "block_content_fingerprint",
     ]);
-    const reasons = new Set(["illegal", "spam", "abuse", "manual"]);
+    const reasons = new Set<ModerationReason>(["illegal", "spam", "abuse", "manual"]);
 
     if (!actionKinds.has(input.kind)) throw new Error("invalid action kind");
     if (!reasons.has(input.reason)) throw new Error("invalid reason");
@@ -199,31 +214,33 @@ export function createModerationService(storeFile) {
     if (!normalizedValue) throw new Error("invalid moderation value");
 
     const store = await readStore();
-    const action = {
+    const action: ModerationAction = {
       id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
       kind: input.kind,
       value: normalizedValue,
       reason: input.reason,
-      note: input.note?.trim() || undefined,
       createdAt: Date.now(),
       moderator: input.moderator?.trim() || "local-admin",
     };
+    const note = input.note?.trim();
+    if (note) action.note = note;
     store.actions.push(action);
     await writeStore(store);
     return action;
   }
 
-  async function deleteAction(id) {
+  async function deleteAction(id: string): Promise<ModerationAction> {
     const store = await readStore();
     const index = store.actions.findIndex((action) => action.id === id);
     if (index === -1) throw new Error("moderation action not found");
 
     const [action] = store.actions.splice(index, 1);
+    if (!action) throw new Error("moderation action not found");
     await writeStore(store);
     return action;
   }
 
-  function isEventModerated(event, manifest) {
+  function isEventModerated(event: NostrEvent, manifest: ModerationManifest): boolean {
     const variants = visibleEventVariants(event);
     const blockedEventIds = new Set(manifest.blockedEventIds);
     if (variants.some((variant) => blockedEventIds.has(variant.id.toLowerCase()))) {

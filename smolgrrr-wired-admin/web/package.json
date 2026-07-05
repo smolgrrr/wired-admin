@@ -1,16 +1,24 @@
 {
   "name": "wired-admin-web",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node server.js",
-    "check": "node --check server.js"
+    "build": "rm -rf dist dist-admin-client && tsc -p tsconfig.json && tsc -p tsconfig.admin-client.json && cp dist-admin-client/admin-client/app.js public/app.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.admin-client.json --noEmit",
+    "start": "node dist/server.js",
+    "check": "npm run typecheck && npm run build && node --check dist/server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
     "nostr-tools": "^2.23.8",
     "sharp": "^0.35.3",
     "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.2"
   }
 }

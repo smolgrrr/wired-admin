@@ -3,7 +3,7 @@ id: smolgrrr-wired-admin
 category: social
 name: Wired Admin
 icon: https://raw.githubusercontent.com/smolgrrr/wired-admin/main/smolgrrr-wired-admin/icon.png
-version: "0.2.8"
+version: "0.2.9"
 tagline: Admin console for Wired relay, feed, and moderation
 description: >-
   Wired Admin runs a strfry Nostr relay behind a lightweight gateway that
@@ -24,6 +24,6 @@ defaultPassword: ""
 deterministicPassword: false
 torOnly: false
 releaseNotes: >-
-  Confess X mirror posts now publish the postcard image without caption text,
-  render the postcard header from the Confess Nostr profile metadata, remove the
-  in-image thread prompt, and use nevent thread links in the reply.
+  Wired Admin now builds from TypeScript with shared server and admin-client
+  contracts for feed snapshots, moderation actions, Confess records, and Nostr
+  event data.

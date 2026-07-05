@@ -1,7 +1,18 @@
 import WebSocket from "ws";
 import { verifyPow } from "./pow.js";
+import type { RelayRecentActivity, RelayStats } from "./contracts/api.js";
+import type { NostrEvent } from "./contracts/nostr.js";
 
-function safeJsonParse(raw) {
+type AddRecent = (type: string, detail: unknown) => void;
+
+type RelayGatewayOptions = {
+  backendUrl: string;
+  minPow: number;
+  stats: RelayStats;
+  addRecent: AddRecent;
+};
+
+function safeJsonParse(raw: string): unknown {
   try {
     return JSON.parse(raw);
   } catch {
@@ -9,13 +20,13 @@ function safeJsonParse(raw) {
   }
 }
 
-function sendOk(ws, eventId, ok, reason) {
+function sendOk(ws: WebSocket, eventId: string | undefined, ok: boolean, reason: string): void {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(["OK", eventId || "", ok, reason]));
   }
 }
 
-function summarizeEvent(event, pow) {
+function summarizeEvent(event: NostrEvent, pow: number): RelayRecentActivity["detail"] {
   return {
     id: event.id,
     kind: event.kind,
@@ -24,19 +35,20 @@ function summarizeEvent(event, pow) {
   };
 }
 
-export function createRelayGateway({ backendUrl, minPow, stats, addRecent }) {
-  return function handleClientConnection(client) {
+export function createRelayGateway({ backendUrl, minPow, stats, addRecent }: RelayGatewayOptions) {
+  return function handleClientConnection(client: WebSocket): void {
     stats.activeClients += 1;
     stats.totalConnections += 1;
     addRecent("client-connected", `${stats.activeClients} active`);
 
     const backend = new WebSocket(backendUrl);
-    const queued = [];
+    const queued: string[] = [];
 
     backend.on("open", () => {
       stats.lastBackendOpenAt = Date.now();
       while (queued.length > 0 && backend.readyState === WebSocket.OPEN) {
-        backend.send(queued.shift());
+        const queuedMessage = queued.shift();
+        if (queuedMessage) backend.send(queuedMessage);
       }
     });
 
@@ -89,7 +101,7 @@ export function createRelayGateway({ backendUrl, minPow, stats, addRecent }) {
 
       if (msg[0] === "EVENT") {
         stats.publishAttempts += 1;
-        const event = msg[1];
+        const event = msg[1] as NostrEvent | undefined;
         const result = verifyPow(event, minPow);
 
         if (!result.ok) {
@@ -99,6 +111,7 @@ export function createRelayGateway({ backendUrl, minPow, stats, addRecent }) {
           return;
         }
 
+        if (!event) return;
         addRecent("publish", summarizeEvent(event, result.pow));
       } else if (msg[0] === "REQ" || msg[0] === "COUNT") {
         stats.reqMessages += 1;
