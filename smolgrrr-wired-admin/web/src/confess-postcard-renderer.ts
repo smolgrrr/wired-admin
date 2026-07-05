@@ -71,8 +71,8 @@ type BodyLine = {
   width: number;
 };
 
-const emojiShortcodePattern = /:([A-Za-z0-9_+-]+):/g;
-const emojiShortcodeValuePattern = /^[A-Za-z0-9_+-]+$/;
+const emojiShortcodePattern = /:([^\s:]{1,64}):/gu;
+const emojiShortcodeValuePattern = /^[^\s:]{1,64}$/u;
 
 function escapeXml(value: unknown): string {
   return String(value || "")

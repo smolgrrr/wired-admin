@@ -593,7 +593,7 @@ function validateConfessXSafety(
   return { ok: true, reason: "", textHash };
 }
 
-const confessXEmojiShortcodePattern = /^[A-Za-z0-9_+-]{1,64}$/;
+const confessXEmojiShortcodePattern = /^[^\s:]{1,64}$/u;
 
 function customEmojisForConfessXMirror(event: NostrEvent, text: string): ConfessXCustomEmoji[] {
   const result = new Map<string, ConfessXCustomEmoji>();
