@@ -18,13 +18,25 @@ export type ConfessPostcardRendererOptions = {
     timeoutMs: number;
     maxBytes: number;
   };
+  customEmojiImage: {
+    timeoutMs: number;
+    maxBytes: number;
+    limitInputPixels: number;
+    outputSize: number;
+  };
   fetchProfileMetadata: (pubkeys: string[]) => Promise<Record<string, ProfileSummary>>;
+};
+
+export type ConfessPostcardCustomEmoji = {
+  shortcode: string;
+  url: string;
 };
 
 export type ConfessPostcardRenderInput = {
   text: string;
   eventId: string;
   pubkey: string;
+  customEmojis?: ConfessPostcardCustomEmoji[];
 };
 
 export type ConfessPostcardRenderResult = {
@@ -37,6 +49,30 @@ export type ConfessPostcardRenderResult = {
 };
 
 type SvgProfile = ProfileSummary | null;
+
+type ResolvedCustomEmoji = {
+  shortcode: string;
+  raw: string;
+  dataUri: string;
+};
+
+type BodyFlowUnit =
+  | { kind: "space"; text: string; width: number }
+  | { kind: "text"; text: string; width: number }
+  | { kind: "emoji"; emoji: ResolvedCustomEmoji; width: number };
+
+type BodyLineItem =
+  | { kind: "text"; text: string; width: number }
+  | { kind: "space"; text: string; width: number }
+  | { kind: "emoji"; emoji: ResolvedCustomEmoji; width: number };
+
+type BodyLine = {
+  items: BodyLineItem[];
+  width: number;
+};
+
+const emojiShortcodePattern = /:([A-Za-z0-9_+-]+):/g;
+const emojiShortcodeValuePattern = /^[A-Za-z0-9_+-]+$/;
 
 function escapeXml(value: unknown): string {
   return String(value || "")
@@ -55,10 +91,137 @@ function normalizeSvgText(value: unknown): string {
     .trim();
 }
 
-function wrapSvgText(value: unknown, maxCharacters: number, maxLines: number): string[] {
+function characterCount(value: string): number {
+  return Array.from(value).length;
+}
+
+function createBodyLine(): BodyLine {
+  return { items: [], width: 0 };
+}
+
+function trimTrailingSpaces(line: BodyLine): void {
+  while (line.items[line.items.length - 1]?.kind === "space") {
+    const item = line.items.pop();
+    line.width -= item?.width || 0;
+  }
+}
+
+function addTextFlowUnits(units: BodyFlowUnit[], value: string, characterWidth: number): void {
+  for (const match of value.matchAll(/\s+|[^\s]+/g)) {
+    const text = match[0];
+    const width = Math.max(characterWidth, characterCount(text) * characterWidth);
+    units.push(/^\s+$/.test(text) ? { kind: "space", text: " ", width: characterWidth } : { kind: "text", text, width });
+  }
+}
+
+function bodyFlowUnitsForParagraph(
+  paragraph: string,
+  emojis: Map<string, ResolvedCustomEmoji>,
+  characterWidth: number,
+  emojiWidth: number,
+): BodyFlowUnit[] {
+  const units: BodyFlowUnit[] = [];
+  let lastIndex = 0;
+
+  for (const match of paragraph.matchAll(emojiShortcodePattern)) {
+    const raw = match[0];
+    const shortcode = match[1] || "";
+    const emoji = emojis.get(shortcode);
+    const index = match.index ?? 0;
+
+    if (!emoji) continue;
+    if (index > lastIndex) addTextFlowUnits(units, paragraph.slice(lastIndex, index), characterWidth);
+    units.push({ kind: "emoji", emoji: { ...emoji, raw }, width: emojiWidth });
+    lastIndex = index + raw.length;
+  }
+
+  if (lastIndex < paragraph.length) addTextFlowUnits(units, paragraph.slice(lastIndex), characterWidth);
+  return units;
+}
+
+function renderableTextWidth(value: string, characterWidth: number): number {
+  return Math.max(characterWidth, characterCount(value) * characterWidth);
+}
+
+function wrapSvgBody(
+  value: unknown,
+  maxWidth: number,
+  maxLines: number,
+  characterWidth: number,
+  emojiWidth: number,
+  emojis: Map<string, ResolvedCustomEmoji>,
+): BodyLine[] {
   const paragraphs = normalizeSvgText(value).split("\n");
-  const lines: string[] = [];
+  const lines: BodyLine[] = [];
+  let current = createBodyLine();
   let truncated = false;
+
+  const commitLine = (allowEmpty = false) => {
+    trimTrailingSpaces(current);
+    if (current.items.length === 0 && !allowEmpty) return;
+    if (lines.length >= maxLines) {
+      truncated = true;
+      return;
+    }
+    lines.push(current);
+    current = createBodyLine();
+  };
+
+  const appendTextChunk = (text: string) => {
+    const width = renderableTextWidth(text, characterWidth);
+    current.items.push({ kind: "text", text, width });
+    current.width += width;
+  };
+
+  const appendUnit = (unit: BodyFlowUnit) => {
+    if (truncated || lines.length >= maxLines) {
+      truncated = true;
+      return;
+    }
+
+    if (unit.kind === "space") {
+      if (current.items.length === 0) return;
+      if (current.width + unit.width <= maxWidth) {
+        current.items.push(unit);
+        current.width += unit.width;
+      }
+      return;
+    }
+
+    if (unit.kind === "emoji") {
+      if (current.items.length > 0 && current.width + unit.width > maxWidth) commitLine();
+      if (lines.length >= maxLines) {
+        truncated = true;
+        return;
+      }
+      current.items.push(unit);
+      current.width += unit.width;
+      return;
+    }
+
+    let text = unit.text;
+    while (text) {
+      if (current.items.length > 0 && current.width + renderableTextWidth(text, characterWidth) > maxWidth) {
+        commitLine();
+      }
+      if (lines.length >= maxLines) {
+        truncated = true;
+        return;
+      }
+
+      const availableWidth = Math.max(characterWidth, maxWidth - current.width);
+      const availableCharacters = Math.max(1, Math.floor(availableWidth / characterWidth));
+      const textCharacters = Array.from(text);
+      if (textCharacters.length <= availableCharacters) {
+        appendTextChunk(text);
+        text = "";
+      } else {
+        appendTextChunk(textCharacters.slice(0, availableCharacters).join(""));
+        text = textCharacters.slice(availableCharacters).join("");
+        commitLine();
+      }
+    }
+  };
 
   for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
     const paragraph = paragraphs[paragraphIndex] ?? "";
@@ -67,50 +230,32 @@ function wrapSvgText(value: unknown, maxCharacters: number, maxLines: number): s
       break;
     }
     if (!paragraph.trim()) {
-      if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+      if (lines.length > 0) commitLine(true);
       continue;
     }
 
-    let line = "";
-    for (const word of paragraph.trim().split(/\s+/)) {
-      const nextLine = line ? `${line} ${word}` : word;
-      if (nextLine.length <= maxCharacters) {
-        line = nextLine;
-        continue;
-      }
-
-      if (line) lines.push(line);
-      line = word;
-
-      while (line.length > maxCharacters) {
-        if (lines.length >= maxLines) {
-          truncated = true;
-          break;
-        }
-        lines.push(line.slice(0, maxCharacters));
-        line = line.slice(maxCharacters);
-      }
-
-      if (lines.length >= maxLines) {
-        truncated = true;
-        break;
-      }
-    }
-
-    if (line && lines.length < maxLines) lines.push(line);
+    for (const unit of bodyFlowUnitsForParagraph(paragraph.trim(), emojis, characterWidth, emojiWidth)) appendUnit(unit);
+    commitLine();
     if (paragraphIndex < paragraphs.length - 1 && lines.length >= maxLines) {
       truncated = true;
       break;
     }
   }
 
-  const limited = lines.slice(0, maxLines);
-  if (limited.length === 0) limited.push("");
-  if (truncated && limited.length > 0) {
-    const lastLine = limited[limited.length - 1] ?? "";
-    limited[limited.length - 1] = `${lastLine.replace(/\s+$/, "")}...`;
+  if (current.items.length > 0 && lines.length < maxLines) commitLine();
+  if (lines.length === 0) lines.push(createBodyLine());
+  if (truncated && lines.length > 0) {
+    const lastLine = lines[lines.length - 1] ?? createBodyLine();
+    trimTrailingSpaces(lastLine);
+    const ellipsisWidth = renderableTextWidth("...", characterWidth);
+    while (lastLine.items.length > 0 && lastLine.width + ellipsisWidth > maxWidth) {
+      const item = lastLine.items.pop();
+      lastLine.width -= item?.width || 0;
+    }
+    lastLine.items.push({ kind: "text", text: "...", width: ellipsisWidth });
+    lastLine.width += ellipsisWidth;
   }
-  return limited;
+  return lines.slice(0, maxLines);
 }
 
 function avatarCellsForPubkey(pubkey: string): boolean[] {
@@ -170,10 +315,12 @@ function confessPostcardSvg({
   text,
   eventId,
   pubkey,
+  customEmojis,
   profile,
   profileImageDataUri,
   image,
-}: ConfessPostcardRenderInput & {
+}: Omit<ConfessPostcardRenderInput, "customEmojis"> & {
+  customEmojis: Map<string, ResolvedCustomEmoji>;
   profile: SvgProfile;
   profileImageDataUri: string | null;
   image: ConfessPostcardImageConfig;
@@ -191,13 +338,28 @@ function confessPostcardSvg({
   const fontSize = Math.max(24, Math.round(36 * scale));
   const lineHeight = Math.round(fontSize * 1.55);
   const maxBodyWidth = cardWidth - Math.round(84 * scale);
-  const maxCharacters = Math.max(18, Math.floor(maxBodyWidth / (fontSize * 0.62)));
+  const characterWidth = fontSize * 0.62;
+  const emojiSize = Math.round(fontSize * 1.18);
+  const emojiWidth = emojiSize + Math.round(4 * scale);
   const maxLines = Math.max(3, Math.floor((cardHeight - Math.round(290 * scale)) / lineHeight));
-  const lines = wrapSvgText(text, maxCharacters, maxLines);
-  const bodyTspans = lines
+  const lines = wrapSvgBody(text, maxBodyWidth, maxLines, characterWidth, emojiWidth, customEmojis);
+  const bodyMarkup = lines
     .map((line, index) => {
-      const dy = index === 0 ? 0 : line === "" ? lineHeight * 0.72 : lineHeight;
-      return `<tspan x="${bodyX}" dy="${index === 0 ? 0 : dy}">${escapeXml(line)}</tspan>`;
+      let x = bodyX;
+      const y = bodyY + index * lineHeight;
+      return line.items
+        .map((item) => {
+          if (item.kind === "emoji") {
+            const imageY = Math.round(y - emojiSize * 0.86);
+            const markup = `<image href="${escapeXml(item.emoji.dataUri)}" x="${Math.round(x)}" y="${imageY}" width="${emojiSize}" height="${emojiSize}" preserveAspectRatio="xMidYMid meet" />`;
+            x += item.width;
+            return markup;
+          }
+          const markup = `<text x="${Math.round(x)}" y="${y}">${escapeXml(item.text)}</text>`;
+          x += item.width;
+          return markup;
+        })
+        .join("");
     })
     .join("");
   const signal = Math.max(0, countLeadingZeroBits(String(eventId || "")));
@@ -247,9 +409,9 @@ function confessPostcardSvg({
   <text x="${labelX}" y="${labelY}" fill="#8a8a96" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(22 * scale)}" letter-spacing="${0.4 * scale}">
     ${escapeXml(profileName)}
   </text>
-  <text x="${bodyX}" y="${bodyY}" fill="#e8e8ec" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${fontSize}" line-height="${lineHeight}">
-    ${bodyTspans}
-  </text>
+  <g fill="#e8e8ec" font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${fontSize}">
+    ${bodyMarkup}
+  </g>
   <g font-family="'IBM Plex Mono','DejaVu Sans Mono',monospace" font-size="${Math.round(19 * scale)}" fill="#8a8a96">
     <text x="${bodyX}" y="${metaY}" fill="#5eead4" filter="url(#signal-glow)">signal ${signal}</text>
     <text x="${bodyX + Math.round(150 * scale)}" y="${metaY}">now</text>
@@ -268,22 +430,33 @@ function isPrivateIpv4(hostname: string): boolean {
 
   const [first = 0, second = 0] = parts;
   return (
+    first === 0 ||
     first === 10 ||
     first === 127 ||
+    (first === 100 && second >= 64 && second <= 127) ||
     (first === 169 && second === 254) ||
     (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && second === 168)
+    (first === 192 && (second === 0 || second === 168)) ||
+    (first === 198 && (second === 18 || second === 19)) ||
+    first >= 224
   );
 }
 
-function isSafeProfileImageUrl(value: string): boolean {
+export function isSafeConfessPostcardImageUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
     const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
     if (parsed.protocol !== "https:") return false;
     if (!hostname || hostname === "localhost" || hostname.endsWith(".local")) return false;
     if (net.isIPv4(hostname) && isPrivateIpv4(hostname)) return false;
-    if (net.isIPv6(hostname) && (hostname === "::1" || hostname.startsWith("fc") || hostname.startsWith("fd"))) {
+    if (
+      net.isIPv6(hostname) &&
+      (hostname === "::" ||
+        hostname === "::1" ||
+        hostname.startsWith("fc") ||
+        hostname.startsWith("fd") ||
+        hostname.startsWith("fe80:"))
+    ) {
       return false;
     }
     return true;
@@ -295,13 +468,28 @@ function isSafeProfileImageUrl(value: string): boolean {
 export function createConfessPostcardRenderer({
   image,
   profileImage,
+  customEmojiImage,
   fetchProfileMetadata,
 }: ConfessPostcardRendererOptions) {
-  async function fetchProfileImageDataUri(url: string | undefined): Promise<string | null> {
-    if (!url || !isSafeProfileImageUrl(url)) return null;
+  async function fetchImageDataUri({
+    url,
+    timeoutMs,
+    maxBytes,
+    limitInputPixels,
+    outputSize,
+    fit,
+  }: {
+    url: string | undefined;
+    timeoutMs: number;
+    maxBytes: number;
+    limitInputPixels: number;
+    outputSize: number;
+    fit: "cover" | "contain";
+  }): Promise<string | null> {
+    if (!url || !isSafeConfessPostcardImageUrl(url)) return null;
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), profileImage.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, {
         signal: controller.signal,
@@ -313,15 +501,18 @@ export function createConfessPostcardRenderer({
       if (contentType && !contentType.startsWith("image/")) return null;
 
       const contentLength = Number(response.headers.get("content-length") || 0);
-      if (contentLength > profileImage.maxBytes) return null;
+      if (contentLength > maxBytes) return null;
 
       const arrayBuffer = await response.arrayBuffer();
-      if (arrayBuffer.byteLength > profileImage.maxBytes) return null;
+      if (arrayBuffer.byteLength > maxBytes) return null;
 
       const png = await sharp(Buffer.from(arrayBuffer), {
-        limitInputPixels: 4096 * 4096,
+        limitInputPixels,
       })
-        .resize(128, 128, { fit: "cover" })
+        .resize(outputSize, outputSize, {
+          fit,
+          background: { r: 0, g: 0, b: 0, alpha: 0 },
+        })
         .png({ compressionLevel: 9, adaptiveFiltering: true })
         .toBuffer();
       return `data:image/png;base64,${png.toString("base64")}`;
@@ -330,6 +521,57 @@ export function createConfessPostcardRenderer({
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  function fetchProfileImageDataUri(url: string | undefined): Promise<string | null> {
+    return fetchImageDataUri({
+      url,
+      timeoutMs: profileImage.timeoutMs,
+      maxBytes: profileImage.maxBytes,
+      limitInputPixels: 4096 * 4096,
+      outputSize: 128,
+      fit: "cover",
+    });
+  }
+
+  async function resolveCustomEmojis(
+    text: string,
+    customEmojis: ConfessPostcardCustomEmoji[] = [],
+  ): Promise<Map<string, ResolvedCustomEmoji>> {
+    const shortcodeToUrl = new Map<string, string>();
+    const fetchCache = new Map<string, Promise<string | null>>();
+    const result = new Map<string, ResolvedCustomEmoji>();
+
+    for (const emoji of customEmojis.slice(0, 32)) {
+      const shortcode = String(emoji.shortcode || "").trim();
+      const url = String(emoji.url || "").trim();
+      if (!emojiShortcodeValuePattern.test(shortcode)) continue;
+      if (!String(text || "").includes(`:${shortcode}:`)) continue;
+      if (shortcodeToUrl.has(shortcode)) continue;
+      shortcodeToUrl.set(shortcode, url);
+    }
+
+    await Promise.all(
+      Array.from(shortcodeToUrl.entries()).map(async ([shortcode, url]) => {
+        let dataUriPromise = fetchCache.get(url);
+        if (!dataUriPromise) {
+          dataUriPromise = fetchImageDataUri({
+            url,
+            timeoutMs: customEmojiImage.timeoutMs,
+            maxBytes: customEmojiImage.maxBytes,
+            limitInputPixels: customEmojiImage.limitInputPixels,
+            outputSize: customEmojiImage.outputSize,
+            fit: "contain",
+          });
+          fetchCache.set(url, dataUriPromise);
+        }
+
+        const dataUri = await dataUriPromise;
+        if (dataUri) result.set(shortcode, { shortcode, raw: `:${shortcode}:`, dataUri });
+      }),
+    );
+
+    return result;
   }
 
   async function resolveProfile(
@@ -353,12 +595,17 @@ export function createConfessPostcardRenderer({
     text,
     eventId,
     pubkey,
+    customEmojis,
   }: ConfessPostcardRenderInput): Promise<ConfessPostcardRenderResult> {
-    const { profile, imageDataUri } = await resolveProfile(pubkey);
+    const [{ profile, imageDataUri }, resolvedCustomEmojis] = await Promise.all([
+      resolveProfile(pubkey),
+      resolveCustomEmojis(text, customEmojis),
+    ]);
     const svg = confessPostcardSvg({
       text,
       eventId,
       pubkey,
+      customEmojis: resolvedCustomEmojis,
       profile,
       profileImageDataUri: imageDataUri,
       image,
