@@ -354,7 +354,7 @@ export function createFeedSnapshotService({
       const since = sinceFromAgeHours(ageHours);
       const rootBatch = await subscribeOnce(
         relays,
-        { kinds: [1, 1068], since, limit: 500 },
+        { kinds: [1], since, limit: 500 },
         powRelays,
       );
       const rootEvents = rootBatch.events;
@@ -404,9 +404,8 @@ export function createFeedSnapshotService({
     const posts = [];
 
     events.forEach((event) => {
-      if (event.kind !== 1 && event.kind !== 1068) return;
+      if (!isRootNote(event)) return;
       if (seenPubkeys.has(event.pubkey)) return;
-      if (event.kind === 1 && !isRootNote(event)) return;
       if (eventPow(event) < minPow) return;
       seenPubkeys.add(event.pubkey);
       posts.push(event);
@@ -443,7 +442,7 @@ export function createFeedSnapshotService({
         relays,
         {
           ids: missingRefs.map((ref) => ref.id),
-          kinds: [1, 1068],
+          kinds: [1],
           limit: missingRefs.length,
         },
         relayUrls,
