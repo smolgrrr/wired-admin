@@ -13,7 +13,16 @@
           <p class="eyebrow">Wired Admin</p>
           <h1>Admin console</h1>
         </div>
-        <div class="status-pill" id="health">checking</div>
+        <div class="topbar-actions">
+          <form class="token-form" id="tokenForm">
+            <label>
+              <span>admin token</span>
+              <input id="adminToken" type="password" autocomplete="off" />
+            </label>
+            <button class="button" type="submit">Save</button>
+          </form>
+          <div class="status-pill" id="health">checking</div>
+        </div>
       </header>
 
       <section class="hero">

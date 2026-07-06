@@ -29,6 +29,8 @@ const ids = [
     "updatedAt",
     "moderationSummary",
     "manifestUpdatedAt",
+    "tokenForm",
+    "adminToken",
     "moderationForm",
     "formStatus",
     "refreshSnapshot",
@@ -40,8 +42,18 @@ function requireElement(id) {
     return element;
 }
 const elements = Object.fromEntries(ids.map((id) => [id, requireElement(id)]));
+elements.adminToken = requireElement("adminToken");
 elements.moderationForm = requireElement("moderationForm");
 elements.refreshSnapshot = requireElement("refreshSnapshot");
+elements.tokenForm = requireElement("tokenForm");
+const ADMIN_TOKEN_STORAGE_KEY = "wiredAdminToken";
+function adminToken() {
+    return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY)?.trim() || "";
+}
+function adminHeaders(extra = {}) {
+    const token = adminToken();
+    return token ? { ...extra, "X-Admin-Token": token } : extra;
+}
 function formatDuration(seconds) {
     const mins = Math.floor(seconds / 60);
     const hours = Math.floor(mins / 60);
@@ -117,6 +129,7 @@ async function deleteAction(id) {
     elements.formStatus.textContent = "Removing";
     const response = await fetch(`/api/moderation/actions/${encodeURIComponent(id)}`, {
         method: "DELETE",
+        headers: adminHeaders(),
     });
     if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -127,11 +140,14 @@ async function deleteAction(id) {
     await Promise.all([refresh(), fetchActions()]);
 }
 async function fetchActions() {
-    const response = await fetch("/api/moderation/actions", { cache: "no-store" });
+    const response = await fetch("/api/moderation/actions", {
+        cache: "no-store",
+        headers: adminHeaders(),
+    });
     if (!response.ok) {
         renderActions([]);
         elements.formStatus.textContent =
-            response.status === 401 ? "Admin actions require MODERATION_ADMIN_TOKEN." : "";
+            response.status === 401 ? "Enter the admin token to manage actions." : "";
         return;
     }
     const data = (await response.json());
@@ -182,13 +198,32 @@ async function refreshSnapshot() {
     elements.refreshSnapshot.disabled = true;
     elements.refreshSnapshot.textContent = "Refreshing";
     try {
-        await fetch("/api/cron/refresh-feed", { cache: "no-store" });
+        await fetch("/api/cron/refresh-feed", {
+            cache: "no-store",
+            headers: adminHeaders({ Authorization: `Bearer ${adminToken()}` }),
+        });
         await refresh();
     }
     finally {
         elements.refreshSnapshot.disabled = false;
         elements.refreshSnapshot.textContent = "Refresh now";
     }
+}
+function setupTokenForm() {
+    elements.adminToken.value = adminToken();
+    elements.tokenForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const token = elements.adminToken.value.trim();
+        if (token) {
+            localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, token);
+            elements.formStatus.textContent = "Admin token saved";
+        }
+        else {
+            localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+            elements.formStatus.textContent = "Admin token cleared";
+        }
+        void Promise.all([refresh(), fetchActions()]);
+    });
 }
 function setupTabs() {
     document.querySelectorAll(".tab").forEach((tab) => {
@@ -212,7 +247,7 @@ function setupModerationForm() {
         elements.formStatus.textContent = "Saving";
         const response = await fetch("/api/moderation/actions", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: adminHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify(Object.fromEntries(formData.entries())),
         });
         if (!response.ok) {
@@ -225,6 +260,7 @@ function setupModerationForm() {
         await Promise.all([refresh(), fetchActions()]);
     });
 }
+setupTokenForm();
 setupTabs();
 setupModerationForm();
 elements.refreshSnapshot.addEventListener("click", refreshSnapshot);

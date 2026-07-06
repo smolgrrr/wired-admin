@@ -37,6 +37,8 @@ const ids = [
   "updatedAt",
   "moderationSummary",
   "manifestUpdatedAt",
+  "tokenForm",
+  "adminToken",
   "moderationForm",
   "formStatus",
   "refreshSnapshot",
@@ -45,8 +47,10 @@ const ids = [
 type ElementId = (typeof ids)[number];
 type StatField = (typeof fields)[number];
 type AdminElements = Record<ElementId, HTMLElement> & {
+  adminToken: HTMLInputElement;
   moderationForm: HTMLFormElement;
   refreshSnapshot: HTMLButtonElement;
+  tokenForm: HTMLFormElement;
 };
 
 function requireElement<T extends HTMLElement = HTMLElement>(id: ElementId): T {
@@ -56,8 +60,21 @@ function requireElement<T extends HTMLElement = HTMLElement>(id: ElementId): T {
 }
 
 const elements = Object.fromEntries(ids.map((id) => [id, requireElement(id)])) as AdminElements;
+elements.adminToken = requireElement<HTMLInputElement>("adminToken");
 elements.moderationForm = requireElement<HTMLFormElement>("moderationForm");
 elements.refreshSnapshot = requireElement<HTMLButtonElement>("refreshSnapshot");
+elements.tokenForm = requireElement<HTMLFormElement>("tokenForm");
+
+const ADMIN_TOKEN_STORAGE_KEY = "wiredAdminToken";
+
+function adminToken(): string {
+  return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY)?.trim() || "";
+}
+
+function adminHeaders(extra: Record<string, string> = {}): HeadersInit {
+  const token = adminToken();
+  return token ? { ...extra, "X-Admin-Token": token } : extra;
+}
 
 function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -147,6 +164,7 @@ async function deleteAction(id: string): Promise<void> {
   elements.formStatus.textContent = "Removing";
   const response = await fetch(`/api/moderation/actions/${encodeURIComponent(id)}`, {
     method: "DELETE",
+    headers: adminHeaders(),
   });
 
   if (!response.ok) {
@@ -160,11 +178,14 @@ async function deleteAction(id: string): Promise<void> {
 }
 
 async function fetchActions(): Promise<void> {
-  const response = await fetch("/api/moderation/actions", { cache: "no-store" });
+  const response = await fetch("/api/moderation/actions", {
+    cache: "no-store",
+    headers: adminHeaders(),
+  });
   if (!response.ok) {
     renderActions([]);
     elements.formStatus.textContent =
-      response.status === 401 ? "Admin actions require MODERATION_ADMIN_TOKEN." : "";
+      response.status === 401 ? "Enter the admin token to manage actions." : "";
     return;
   }
   const data = (await response.json()) as ModerationActionsResponse;
@@ -218,12 +239,31 @@ async function refreshSnapshot(): Promise<void> {
   elements.refreshSnapshot.disabled = true;
   elements.refreshSnapshot.textContent = "Refreshing";
   try {
-    await fetch("/api/cron/refresh-feed", { cache: "no-store" });
+    await fetch("/api/cron/refresh-feed", {
+      cache: "no-store",
+      headers: adminHeaders({ Authorization: `Bearer ${adminToken()}` }),
+    });
     await refresh();
   } finally {
     elements.refreshSnapshot.disabled = false;
     elements.refreshSnapshot.textContent = "Refresh now";
   }
+}
+
+function setupTokenForm(): void {
+  elements.adminToken.value = adminToken();
+  elements.tokenForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const token = elements.adminToken.value.trim();
+    if (token) {
+      localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, token);
+      elements.formStatus.textContent = "Admin token saved";
+    } else {
+      localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+      elements.formStatus.textContent = "Admin token cleared";
+    }
+    void Promise.all([refresh(), fetchActions()]);
+  });
 }
 
 function setupTabs(): void {
@@ -249,7 +289,7 @@ function setupModerationForm(): void {
 
     const response = await fetch("/api/moderation/actions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: adminHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(Object.fromEntries(formData.entries())),
     });
 
@@ -265,6 +305,7 @@ function setupModerationForm(): void {
   });
 }
 
+setupTokenForm();
 setupTabs();
 setupModerationForm();
 elements.refreshSnapshot.addEventListener("click", refreshSnapshot);

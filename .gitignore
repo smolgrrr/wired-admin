@@ -5,6 +5,7 @@ AGENT.md
 .DS_Store
 *.log
 data/
+deploy/staging/.env
 !smolgrrr-wired-pow-relay/data/
 !smolgrrr-wired-pow-relay/data/strfry/
 !smolgrrr-wired-pow-relay/data/strfry/.keep
