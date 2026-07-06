@@ -78,11 +78,18 @@ jobs:
       name: staging
       url: https://staging.wiredsignal.online
     env:
-      IMAGE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag != '' && format('{0}:{1}', env.IMAGE_NAME, inputs.image_tag) || needs.build.outputs.image_ref }}
       STAGING_PATH: ${{ vars.STAGING_PATH || '/home/umbrel/wired-admin-staging' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Select image
+        run: |
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            echo "IMAGE_REF=${IMAGE_NAME}:${{ inputs.image_tag }}" >> "$GITHUB_ENV"
+          else
+            echo "IMAGE_REF=${{ needs.build.outputs.image_ref }}" >> "$GITHUB_ENV"
+          fi
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -103,7 +110,7 @@ jobs:
           WIRED_ADMIN_IMAGE=${IMAGE_REF}
           WIRED_ADMIN_DATA_DIR=${STAGING_PATH}/data
           WIRED_ADMIN_STRFRY_CONF=${STAGING_PATH}/deploy/strfry.conf
-          CLOUDFLARED_TOKEN=${{ secrets.CLOUDFLARED_TOKEN }}
+          WIRED_ADMIN_STAGING_PORT=${{ vars.STAGING_PORT || '3001' }}
           MODERATION_ADMIN_TOKEN=${{ secrets.STAGING_ADMIN_TOKEN }}
           CRON_SECRET=${{ secrets.STAGING_ADMIN_TOKEN }}
           RELAY_MIN_POW=${{ vars.STAGING_RELAY_MIN_POW || '16' }}

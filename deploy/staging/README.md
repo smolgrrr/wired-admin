@@ -6,20 +6,21 @@ The staging environment is exposed through the Cloudflare Tunnel hostname:
 https://staging.wiredsignal.online
 ```
 
-The tunnel and DNS route are managed in Cloudflare. The compose stack only needs
-the connector token in `CLOUDFLARED_TOKEN`; never commit that value.
+The tunnel and DNS route are managed by the existing Umbrel Cloudflare Tunnel
+app. Staging exposes its web service on the Umbrel host, and the existing
+`wired` tunnel routes `staging.wiredsignal.online` to that host port.
 
 ## GitHub environment secrets
 
 Create a protected `staging` environment with these secrets:
 
-- `CLOUDFLARED_TOKEN`: connector token for the `wired-admin-staging` tunnel
 - `STAGING_ADMIN_TOKEN`: admin API and cron token for staging
 
 Optional environment variables:
 
 - `STAGING_PATH`: deploy directory on the self-hosted runner, defaults to
   `/home/umbrel/wired-admin-staging`
+- `STAGING_PORT`: host port routed by Cloudflare, defaults to `3001`
 - `STAGING_RELAY_MIN_POW`: defaults to `16`
 - `STAGING_FEED_SNAPSHOT_AGE_HOURS`: defaults to `24`
 - `STAGING_FEED_SNAPSHOT_REFRESH_SECONDS`: defaults to `300`
@@ -48,7 +49,7 @@ Create `/home/umbrel/wired-admin-staging/deploy/.env`:
 WIRED_ADMIN_IMAGE=ghcr.io/smolgrrr/wired-admin-web:staging-latest
 WIRED_ADMIN_DATA_DIR=/home/umbrel/wired-admin-staging/data
 WIRED_ADMIN_STRFRY_CONF=/home/umbrel/wired-admin-staging/deploy/strfry.conf
-CLOUDFLARED_TOKEN=...
+WIRED_ADMIN_STAGING_PORT=3001
 MODERATION_ADMIN_TOKEN=...
 CRON_SECRET=...
 ```
