@@ -45,6 +45,26 @@ select {
   margin-bottom: 24px;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.token-form {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.token-form label {
+  width: min(260px, 42vw);
+}
+
+.token-form input {
+  min-height: 38px;
+}
+
 .eyebrow,
 .label,
 .metric p,
@@ -351,6 +371,16 @@ select {
   .panel-head {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .topbar-actions,
+  .token-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .token-form label {
+    width: 100%;
   }
 
   .grid,

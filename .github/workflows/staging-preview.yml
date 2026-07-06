@@ -1,0 +1,120 @@
+name: Staging preview
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - "staging/**"
+      - "preview/**"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Existing image tag to deploy instead of building this ref
+        required: false
+        type: string
+      deploy:
+        description: Deploy to staging after the image is available
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}-web
+  STAGING_BASE_URL: https://staging.wiredsignal.online
+
+jobs:
+  build:
+    if: ${{ inputs.image_tag == '' || inputs.image_tag == null }}
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: staging-${{ steps.short-sha.outputs.value }}
+      image_ref: ${{ env.IMAGE_NAME }}:staging-${{ steps.short-sha.outputs.value }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Short SHA
+        id: short-sha
+        run: echo "value=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push staging image
+        uses: docker/build-push-action@v6
+        with:
+          context: smolgrrr-wired-admin/web
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:staging-${{ steps.short-sha.outputs.value }}
+            ${{ env.IMAGE_NAME }}:staging-latest
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+  deploy:
+    needs: build
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.deploy) }}
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - umbrel
+      - wired-admin
+    environment:
+      name: staging
+      url: https://staging.wiredsignal.online
+    env:
+      IMAGE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag != '' && format('{0}:{1}', env.IMAGE_NAME, inputs.image_tag) || needs.build.outputs.image_ref }}
+      STAGING_PATH: ${{ vars.STAGING_PATH || '/home/umbrel/wired-admin-staging' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare staging assets
+        run: |
+          mkdir -p "${STAGING_PATH}/deploy" "${STAGING_PATH}/data/web" "${STAGING_PATH}/data/strfry"
+          cp deploy/staging/docker-compose.yml "${STAGING_PATH}/deploy/docker-compose.yml"
+          cp smolgrrr-wired-admin/strfry.conf "${STAGING_PATH}/deploy/strfry.conf"
+
+      - name: Deploy staging stack
+        run: |
+          cat > "${STAGING_PATH}/deploy/.env" <<EOF
+          WIRED_ADMIN_IMAGE=${IMAGE_REF}
+          WIRED_ADMIN_DATA_DIR=${STAGING_PATH}/data
+          WIRED_ADMIN_STRFRY_CONF=${STAGING_PATH}/deploy/strfry.conf
+          CLOUDFLARED_TOKEN=${{ secrets.CLOUDFLARED_TOKEN }}
+          MODERATION_ADMIN_TOKEN=${{ secrets.STAGING_ADMIN_TOKEN }}
+          CRON_SECRET=${{ secrets.STAGING_ADMIN_TOKEN }}
+          RELAY_MIN_POW=${{ vars.STAGING_RELAY_MIN_POW || '16' }}
+          FEED_SNAPSHOT_AGE_HOURS=${{ vars.STAGING_FEED_SNAPSHOT_AGE_HOURS || '24' }}
+          FEED_SNAPSHOT_REFRESH_SECONDS=${{ vars.STAGING_FEED_SNAPSHOT_REFRESH_SECONDS || '300' }}
+          EOF
+          cd "${STAGING_PATH}/deploy"
+          docker compose --env-file .env -f docker-compose.yml pull
+          docker compose --env-file .env -f docker-compose.yml up -d --remove-orphans
+
+      - name: Smoke test staging
+        env:
+          STAGING_ADMIN_TOKEN: ${{ secrets.STAGING_ADMIN_TOKEN }}
+        run: scripts/staging-smoke-test.sh "$STAGING_BASE_URL"
