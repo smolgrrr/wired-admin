@@ -26,14 +26,33 @@ export function isNostrEvent(value: unknown): value is NostrEvent {
 
 export function parseFeedBootstrapSnapshot(value: unknown): FeedBootstrapSnapshot | null {
   if (!isRecord(value)) return null;
-  if (value.version !== 2) return null;
   if (typeof value.fetchedAt !== "number") return null;
   if (!Array.isArray(value.processedEvents)) return null;
+  if (
+    !value.processedEvents.every((event) =>
+      isRecord(event) &&
+      typeof event.postEventId === "string" &&
+      isStringArray(event.replyIds) &&
+      (event.relayHints === undefined || isStringArray(event.relayHints)) &&
+      typeof event.threadReplyCount === "number" &&
+      typeof event.rootWork === "number" &&
+      typeof event.replyWork === "number" &&
+      typeof event.totalWork === "number" &&
+      typeof event.rankingReplyCount === "number"
+    )
+  ) {
+    return null;
+  }
   if (!isRecord(value.eventsById)) return null;
   if (!Object.values(value.eventsById).every(isNostrEvent)) return null;
   if (!isRecord(value.relayHintsByEventId)) return null;
+  if (!Object.values(value.relayHintsByEventId).every(isStringArray)) return null;
   if (!isRecord(value.profiles)) return null;
   if (!isRecord(value.scoring)) return null;
+  if (typeof value.scoring.ageHours !== "number") return null;
+  if (typeof value.scoring.minPow !== "number") return null;
+  if (typeof value.scoring.replyDepth !== "number") return null;
+  if (value.scoring.sort !== "totalWork") return null;
   return value as FeedBootstrapSnapshot;
 }
 

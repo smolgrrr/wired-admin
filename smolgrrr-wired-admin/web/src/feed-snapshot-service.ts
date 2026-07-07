@@ -893,7 +893,6 @@ export function createFeedSnapshotService({
     const profiles = await fetchProfileMetadata(pubkeys);
 
     return {
-      version: 2,
       fetchedAt: Date.now(),
       processedEvents: serializeProcessedEvents(processedEvents),
       eventsById: buildEventsById(events),
