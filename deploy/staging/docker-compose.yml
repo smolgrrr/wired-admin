@@ -32,6 +32,8 @@ services:
       CONFESS_X_ENABLED: "false"
       CONFESS_X_DRY_RUN: "true"
       CONFESS_X_THREAD_BASE_URL: https://staging.wiredsignal.online/thread
+    ports:
+      - "${WIRED_ADMIN_STAGING_PORT:-3001}:3000"
     volumes:
       - ${WIRED_ADMIN_DATA_DIR:-./data}/web:/app/data
     depends_on:
@@ -47,10 +49,3 @@ services:
     volumes:
       - ${WIRED_ADMIN_DATA_DIR:-./data}/strfry:/app/strfry-db
       - ${WIRED_ADMIN_STRFRY_CONF:-./strfry.conf}:/etc/strfry/strfry.conf:ro
-
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN:?set CLOUDFLARED_TOKEN}
-    depends_on:
-      - web
