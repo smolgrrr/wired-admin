@@ -26,11 +26,14 @@ export function isNostrEvent(value: unknown): value is NostrEvent {
 
 export function parseFeedBootstrapSnapshot(value: unknown): FeedBootstrapSnapshot | null {
   if (!isRecord(value)) return null;
+  if (value.version !== 2) return null;
   if (typeof value.fetchedAt !== "number") return null;
   if (!Array.isArray(value.processedEvents)) return null;
-  if (!Array.isArray(value.events) || !value.events.every(isNostrEvent)) return null;
+  if (!isRecord(value.eventsById)) return null;
+  if (!Object.values(value.eventsById).every(isNostrEvent)) return null;
   if (!isRecord(value.relayHintsByEventId)) return null;
   if (!isRecord(value.profiles)) return null;
+  if (!isRecord(value.scoring)) return null;
   return value as FeedBootstrapSnapshot;
 }
 

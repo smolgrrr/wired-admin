@@ -18,12 +18,32 @@ export type ProcessedFeedEvent = {
   rankingReplyCount: number;
 };
 
+export type FeedBootstrapProcessedEvent = {
+  postEventId: string;
+  replyIds: string[];
+  relayHints?: RelayUrl[];
+  threadReplyCount: number;
+  rootWork: number;
+  replyWork: number;
+  totalWork: number;
+  rankingReplyCount: number;
+};
+
+export type FeedBootstrapScoring = {
+  ageHours: number;
+  minPow: number;
+  replyDepth: number;
+  sort: "totalWork";
+};
+
 export type FeedBootstrapSnapshot = {
+  version: 2;
   fetchedAt: number;
-  processedEvents: ProcessedFeedEvent[];
-  events: NostrEvent[];
+  processedEvents: FeedBootstrapProcessedEvent[];
+  eventsById: Record<string, NostrEvent>;
   relayHintsByEventId: RelayHintsRecord;
   profiles: Record<Pubkey, ProfileSummary>;
+  scoring: FeedBootstrapScoring;
 };
 
 export type ModerationManifest = {

@@ -4,6 +4,7 @@ import { nip19, Relay, type Filter } from "nostr-tools";
 import { eventPow } from "./pow.js";
 import { normalizeRelayUrl, normalizeUrl, uniqueRelays } from "./utils.js";
 import type {
+  FeedBootstrapProcessedEvent,
   FeedBootstrapSnapshot,
   FeedSnapshotStatus,
   ProcessedFeedEvent,
@@ -741,6 +742,32 @@ export function createFeedSnapshotService({
       .sort((a, b) => b.totalWork - a.totalWork || b.postEvent.created_at - a.postEvent.created_at);
   }
 
+  function buildEventsById(events: NostrEvent[]): Record<string, NostrEvent> {
+    return Object.fromEntries(
+      mergeEvents(events).map((event) => [normalizeEventId(event.id), event]),
+    );
+  }
+
+  function serializeProcessedEvents(
+    processedEvents: ProcessedFeedEvent[],
+  ): FeedBootstrapProcessedEvent[] {
+    return processedEvents.map((processed) => {
+      const serialized: FeedBootstrapProcessedEvent = {
+        postEventId: normalizeEventId(processed.postEvent.id),
+        replyIds: processed.replies.map((reply) => normalizeEventId(reply.id)),
+        threadReplyCount: processed.threadReplyCount,
+        rootWork: processed.rootWork,
+        replyWork: processed.replyWork,
+        totalWork: processed.totalWork,
+        rankingReplyCount: processed.rankingReplyCount,
+      };
+      if (processed.relayHints && processed.relayHints.length > 0) {
+        serialized.relayHints = processed.relayHints;
+      }
+      return serialized;
+    });
+  }
+
   async function fetchReferencedEvents(refs: ReferencedEventRef[], knownEventIds: Set<string>): Promise<RelayBatch> {
     const missingRefs = refs.filter((ref) => !knownEventIds.has(ref.id));
     if (missingRefs.length === 0) {
@@ -866,11 +893,18 @@ export function createFeedSnapshotService({
     const profiles = await fetchProfileMetadata(pubkeys);
 
     return {
+      version: 2,
       fetchedAt: Date.now(),
-      processedEvents,
-      events,
+      processedEvents: serializeProcessedEvents(processedEvents),
+      eventsById: buildEventsById(events),
       relayHintsByEventId: serializeRelayHints(relayHintsByEventId),
       profiles,
+      scoring: {
+        ageHours,
+        minPow,
+        replyDepth: replyFetchDepth,
+        sort: "totalWork",
+      },
     };
   }
 
@@ -899,7 +933,7 @@ export function createFeedSnapshotService({
     return {
       fetchedAt: snapshot?.fetchedAt || null,
       postCount: snapshot?.processedEvents?.length || 0,
-      eventCount: snapshot?.events?.length || 0,
+      eventCount: snapshot ? Object.keys(snapshot.eventsById || {}).length : 0,
       relayHintCount: snapshot ? Object.keys(snapshot.relayHintsByEventId || {}).length : 0,
       profileCount: snapshot ? Object.keys(snapshot.profiles).length : 0,
       refreshing: Boolean(refreshPromise),
