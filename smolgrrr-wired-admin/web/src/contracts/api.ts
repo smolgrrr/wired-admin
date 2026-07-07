@@ -37,7 +37,6 @@ export type FeedBootstrapScoring = {
 };
 
 export type FeedBootstrapSnapshot = {
-  version: 2;
   fetchedAt: number;
   processedEvents: FeedBootstrapProcessedEvent[];
   eventsById: Record<string, NostrEvent>;
