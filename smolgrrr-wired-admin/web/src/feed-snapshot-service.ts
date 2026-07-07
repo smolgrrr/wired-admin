@@ -51,6 +51,15 @@ type FetchReplyClosureOptions = {
   knownEventIds?: Set<string>;
 };
 
+type RootRefCandidate = {
+  ref: ReferencedEventRef;
+  definitive: boolean;
+};
+
+type RootResolutionTrace = RootRefCandidate & {
+  nextMissingRef?: ReferencedEventRef;
+};
+
 export type FeedSnapshotService = ReturnType<typeof createFeedSnapshotService>;
 
 function isRootNote(event: NostrEvent): boolean {
@@ -84,7 +93,7 @@ function mergeRelayHints(...hintGroups: RelayHintsByEventId[]): RelayHintsByEven
 function mergeEvents(...eventGroups: NostrEvent[][]): NostrEvent[] {
   const merged = new Map<string, NostrEvent>();
   eventGroups.forEach((events) => {
-    events.forEach((event) => merged.set(event.id, event));
+    events.forEach((event) => merged.set(normalizeEventId(event.id), event));
   });
   return [...merged.values()];
 }
@@ -101,16 +110,32 @@ function serializeRelayHints(relayHintsByEventId: RelayHintsByEventId): RelayHin
 const eventIdPattern = /^[0-9a-f]{64}$/i;
 const nostrRefPattern = /nostr:(?:note|nevent|naddr|npub|nprofile|nrelay)1[a-z0-9]+/gi;
 
+function normalizeEventId(id: string): string {
+  return id.toLowerCase();
+}
+
+function isEventId(id: unknown): id is string {
+  return typeof id === "string" && eventIdPattern.test(id);
+}
+
+function relayHintFromTag(tag: string[]): RelayUrl | undefined {
+  const rawRelay = tag[2];
+  if (!rawRelay) return undefined;
+
+  const normalizedRelay = normalizeRelayUrl(rawRelay);
+  return /^wss?:\/\//i.test(normalizedRelay) ? normalizedRelay : undefined;
+}
+
 function decodeNostrEventRef(ref: unknown): ReferencedEventRef | null {
   const bech32 = String(ref || "").replace(/^nostr:/i, "");
   try {
     const decoded = nip19.decode(bech32);
     if (decoded.type === "note") {
-      return { id: decoded.data, relays: [] };
+      return { id: normalizeEventId(decoded.data), relays: [] };
     }
     if (decoded.type === "nevent") {
       return {
-        id: decoded.data.id,
+        id: normalizeEventId(decoded.data.id),
         relays: uniqueRelays(decoded.data.relays || []),
       };
     }
@@ -123,7 +148,7 @@ function decodeNostrEventRef(ref: unknown): ReferencedEventRef | null {
 function addReferencedEventRef(refsById: Map<string, ReferencedEventRef>, id: string, relays: string[] = []): void {
   if (!eventIdPattern.test(id)) return;
 
-  const normalizedId = id.toLowerCase();
+  const normalizedId = normalizeEventId(id);
   const existing = refsById.get(normalizedId);
   if (existing) {
     existing.relays = uniqueRelays([...existing.relays, ...relays]);
@@ -132,12 +157,123 @@ function addReferencedEventRef(refsById: Map<string, ReferencedEventRef>, id: st
   refsById.set(normalizedId, { id: normalizedId, relays: uniqueRelays(relays) });
 }
 
+function mergeRefRelays(ref: ReferencedEventRef, relays: RelayUrl[] = []): ReferencedEventRef {
+  return {
+    id: normalizeEventId(ref.id),
+    relays: uniqueRelays([...ref.relays, ...relays]),
+  };
+}
+
+function addReferencedEventRefValue(
+  refsById: Map<string, ReferencedEventRef>,
+  ref: ReferencedEventRef,
+): void {
+  addReferencedEventRef(refsById, ref.id, ref.relays);
+}
+
+function eventRefFromETag(tag: string[]): ReferencedEventRef | null {
+  if (tag[0] !== "e" || !tag[1]) return null;
+
+  const relayHint = relayHintFromTag(tag);
+  if (isEventId(tag[1])) {
+    return {
+      id: normalizeEventId(tag[1]),
+      relays: relayHint ? [relayHint] : [],
+    };
+  }
+
+  const decoded = decodeNostrEventRef(tag[1]);
+  if (!decoded) return null;
+
+  return mergeRefRelays(decoded, relayHint ? [relayHint] : []);
+}
+
+function rootMarkerRef(event: NostrEvent): ReferencedEventRef | null {
+  for (const tag of event.tags || []) {
+    if (String(tag[3] || "").toLowerCase() !== "root") continue;
+    const ref = eventRefFromETag(tag);
+    if (ref) return ref;
+  }
+
+  return null;
+}
+
+function firstETagRef(event: NostrEvent): ReferencedEventRef | null {
+  for (const tag of event.tags || []) {
+    const ref = eventRefFromETag(tag);
+    if (ref) return ref;
+  }
+
+  return null;
+}
+
+function directRootRefCandidate(event: NostrEvent): RootRefCandidate | null {
+  if (event.kind !== 1) return null;
+
+  if (isRootNote(event)) {
+    return { ref: { id: normalizeEventId(event.id), relays: [] }, definitive: true };
+  }
+
+  const rootRef = rootMarkerRef(event);
+  if (rootRef) return { ref: rootRef, definitive: true };
+
+  const fallbackRef = firstETagRef(event);
+  return fallbackRef ? { ref: fallbackRef, definitive: false } : null;
+}
+
+function buildEventById(events: NostrEvent[]): Map<string, NostrEvent> {
+  const eventById = new Map<string, NostrEvent>();
+  events.forEach((event) => eventById.set(normalizeEventId(event.id), event));
+  return eventById;
+}
+
+function traceRootRefFromKnownEvents(
+  event: NostrEvent,
+  eventById: Map<string, NostrEvent>,
+  maxDepth: number,
+): RootResolutionTrace | null {
+  const direct = directRootRefCandidate(event);
+  if (!direct) return null;
+  if (direct.definitive) return direct;
+
+  const fallbackRef = direct.ref;
+  let currentRef = direct.ref;
+  const seenIds = new Set<string>([normalizeEventId(event.id)]);
+
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    if (seenIds.has(currentRef.id)) break;
+    seenIds.add(currentRef.id);
+
+    const linkedEvent = eventById.get(currentRef.id);
+    if (!linkedEvent) {
+      return {
+        ref: fallbackRef,
+        definitive: false,
+        nextMissingRef: currentRef,
+      };
+    }
+
+    const linkedRoot = directRootRefCandidate(linkedEvent);
+    if (!linkedRoot) break;
+
+    currentRef = mergeRefRelays(linkedRoot.ref, currentRef.relays);
+    if (linkedRoot.definitive) {
+      return {
+        ref: currentRef,
+        definitive: true,
+      };
+    }
+  }
+
+  return { ref: fallbackRef, definitive: false };
+}
+
 function extractMentionedEventRefs(event: NostrEvent): ReferencedEventRef[] {
   const refsById = new Map<string, ReferencedEventRef>();
 
   for (const tag of event.tags || []) {
     if ((tag[0] === "q" || tag[0] === "e") && tag[1]) {
-      const relayHint = tag[2] ? normalizeRelayUrl(tag[2]) : undefined;
+      const relayHint = relayHintFromTag(tag);
 
       if (eventIdPattern.test(tag[1])) {
         addReferencedEventRef(refsById, tag[1], relayHint ? [relayHint] : []);
@@ -202,10 +338,11 @@ function buildRepliesByParent(events: NostrEvent[]): Map<string, NostrEvent[]> {
   events.forEach((event) => {
     if (event.kind !== 1) return;
     (event.tags || []).forEach((tag) => {
-      if (tag[0] !== "e" || !tag[1]) return;
-      const replies = repliesByParent.get(tag[1]) || [];
+      if (tag[0] !== "e" || !isEventId(tag[1])) return;
+      const parentId = normalizeEventId(tag[1]);
+      const replies = repliesByParent.get(parentId) || [];
       replies.push(event);
-      repliesByParent.set(tag[1], replies);
+      repliesByParent.set(parentId, replies);
     });
   });
   return repliesByParent;
@@ -213,14 +350,15 @@ function buildRepliesByParent(events: NostrEvent[]): Map<string, NostrEvent[]> {
 
 function collectThreadReplies(rootId: string, repliesByParent: Map<string, NostrEvent[]>): NostrEvent[] {
   const replies: NostrEvent[] = [];
-  const seen = new Set();
-  const pending = [...(repliesByParent.get(rootId) || [])];
+  const seen = new Set<string>();
+  const pending = [...(repliesByParent.get(normalizeEventId(rootId)) || [])];
   while (pending.length > 0) {
     const reply = pending.shift();
-    if (!reply || seen.has(reply.id)) continue;
-    seen.add(reply.id);
+    const replyId = reply ? normalizeEventId(reply.id) : "";
+    if (!reply || seen.has(replyId)) continue;
+    seen.add(replyId);
     replies.push(reply);
-    pending.push(...(repliesByParent.get(reply.id) || []));
+    pending.push(...(repliesByParent.get(replyId) || []));
   }
   return replies;
 }
@@ -230,7 +368,7 @@ function eventWork(event: NostrEvent): number {
 }
 
 function relayHintsForEvent(eventId: string, relayHintsByEventId: RelayHintsByEventId): RelayUrl[] | undefined {
-  const relayHints = relayHintsByEventId?.get(eventId);
+  const relayHints = relayHintsByEventId.get(eventId) || relayHintsByEventId.get(normalizeEventId(eventId));
   if (!relayHints) return undefined;
 
   const normalized = [...new Set(relayHints.map(normalizeRelayUrl).filter(Boolean))];
@@ -293,6 +431,7 @@ export function createFeedSnapshotService({
   let snapshot: FeedBootstrapSnapshot | null = null;
   let lastRefreshError: string | null = null;
   let refreshPromise: Promise<FeedBootstrapSnapshot> | null = null;
+  const rootResolutionDepth = Math.max(1, replyFetchDepth + 1);
 
   async function subscribeOnce(relays: ConnectedRelay[], filter: Filter, relayUrls?: RelayUrl[]): Promise<RelayBatch> {
     const targetRelays = relayUrls
@@ -376,11 +515,12 @@ export function createFeedSnapshotService({
       });
 
       replyBatch.events.forEach((event) => {
-        if (knownEventIds.has(event.id) || seenReplyIds.has(event.id)) return;
+        const eventId = normalizeEventId(event.id);
+        if (knownEventIds.has(eventId) || seenReplyIds.has(eventId)) return;
 
-        seenReplyIds.add(event.id);
+        seenReplyIds.add(eventId);
         replyEvents.push(event);
-        childParentIds.push(event.id);
+        childParentIds.push(eventId);
       });
 
       nextParents = childParentIds;
@@ -389,31 +529,149 @@ export function createFeedSnapshotService({
     return { events: replyEvents, relayHintsByEventId: replyRelayHintsByEventId };
   }
 
-  async function fetchGlobalFeedEvents(): Promise<RelayBatch> {
-    const relays = await connectRelays(threadRelays);
+  async function fetchEventsByRefs(
+    refs: ReferencedEventRef[],
+    baseRelayUrls: RelayUrl[],
+    knownEventIds: Set<string> = new Set(),
+  ): Promise<RelayBatch> {
+    const refsById = new Map<string, ReferencedEventRef>();
+    refs.forEach((ref) => {
+      if (isEventId(ref.id)) addReferencedEventRefValue(refsById, ref);
+    });
+
+    const missingRefs = [...refsById.values()].filter((ref) => !knownEventIds.has(ref.id));
+    if (missingRefs.length === 0) {
+      return { events: [], relayHintsByEventId: new Map() };
+    }
+
+    const relayUrls = uniqueRelays([
+      ...baseRelayUrls,
+      ...missingRefs.flatMap((ref) => ref.relays),
+    ]);
+    const relays = await connectRelays(relayUrls);
+
     try {
-      const notes = new Set<string>();
+      return await subscribeOnce(
+        relays,
+        {
+          ids: missingRefs.map((ref) => ref.id),
+          kinds: [1],
+          limit: missingRefs.length,
+        },
+        relayUrls,
+      );
+    } finally {
+      closeRelays(relays);
+    }
+  }
+
+  async function resolveRootRefsForActivity(
+    activityEvents: NostrEvent[],
+    seedEvents: NostrEvent[],
+  ): Promise<RelayBatch & { rootRefs: ReferencedEventRef[] }> {
+    const eventById = buildEventById(seedEvents);
+    const attemptedIds = new Set<string>();
+    const resolutionBatches: RelayBatch[] = [];
+
+    const resolveFromKnownEvents = () => {
+      const rootRefsById = new Map<string, ReferencedEventRef>();
+      const nextMissingRefsById = new Map<string, ReferencedEventRef>();
+
+      activityEvents.forEach((event) => {
+        const trace = traceRootRefFromKnownEvents(event, eventById, rootResolutionDepth);
+        if (!trace) return;
+
+        addReferencedEventRefValue(rootRefsById, trace.ref);
+        if (
+          trace.nextMissingRef &&
+          !eventById.has(trace.nextMissingRef.id) &&
+          !attemptedIds.has(trace.nextMissingRef.id)
+        ) {
+          addReferencedEventRefValue(nextMissingRefsById, trace.nextMissingRef);
+        }
+      });
+
+      return {
+        rootRefs: [...rootRefsById.values()],
+        nextMissingRefs: [...nextMissingRefsById.values()],
+      };
+    };
+
+    let resolved = resolveFromKnownEvents();
+
+    for (
+      let depth = 0;
+      depth < rootResolutionDepth && resolved.nextMissingRefs.length > 0;
+      depth += 1
+    ) {
+      resolved.nextMissingRefs.forEach((ref) => attemptedIds.add(ref.id));
+
+      const batch = await fetchEventsByRefs(
+        resolved.nextMissingRefs,
+        uniqueRelays([...threadRelays, ...enrichmentRelays]),
+        new Set(eventById.keys()),
+      );
+      resolutionBatches.push(batch);
+      batch.events.forEach((event) => eventById.set(normalizeEventId(event.id), event));
+
+      resolved = resolveFromKnownEvents();
+    }
+
+    return {
+      rootRefs: resolved.rootRefs,
+      events: mergeEvents(...resolutionBatches.map((batch) => batch.events)),
+      relayHintsByEventId: mergeRelayHints(
+        ...resolutionBatches.map((batch) => batch.relayHintsByEventId),
+      ),
+    };
+  }
+
+  async function fetchGlobalFeedEvents(): Promise<RelayBatch> {
+    const relays = await connectRelays(uniqueRelays([...threadRelays, ...powRelays]));
+    try {
       const since = sinceFromAgeHours(ageHours);
-      const rootBatch = await subscribeOnce(
+      const activityBatch = await subscribeOnce(
         relays,
         { kinds: [1], since, limit: 500 },
         powRelays,
       );
-      const rootEvents = rootBatch.events;
+      const qualifyingActivityEvents = activityBatch.events.filter(
+        (event) => event.kind === 1 && eventPow(event) >= minPow,
+      );
+      const rootResolutionBatch = await resolveRootRefsForActivity(
+        qualifyingActivityEvents,
+        activityBatch.events,
+      );
+      const knownEventIds = new Set(
+        mergeEvents(activityBatch.events, rootResolutionBatch.events).map((event) =>
+          normalizeEventId(event.id),
+        ),
+      );
+      const rootBatch = await fetchEventsByRefs(
+        rootResolutionBatch.rootRefs,
+        uniqueRelays([...threadRelays, ...enrichmentRelays]),
+        knownEventIds,
+      );
+      rootBatch.events.forEach((event) => knownEventIds.add(normalizeEventId(event.id)));
 
-      rootEvents.forEach((event) => {
-        if (isRootNote(event)) notes.add(event.id);
-      });
-
+      const rootIds = rootResolutionBatch.rootRefs.map((ref) => ref.id);
       const replyBatch = await fetchReplyClosure({
         relays,
-        parentIds: [...notes],
+        parentIds: rootIds,
         relayUrls: threadRelays,
+        knownEventIds,
       });
 
       return {
-        events: mergeEvents(rootEvents, replyBatch.events),
+        events: mergeEvents(
+          activityBatch.events,
+          rootResolutionBatch.events,
+          rootBatch.events,
+          replyBatch.events,
+        ),
         relayHintsByEventId: mergeRelayHints(
+          activityBatch.relayHintsByEventId,
+          rootResolutionBatch.relayHintsByEventId,
           rootBatch.relayHintsByEventId,
           replyBatch.relayHintsByEventId,
         ),
@@ -441,17 +699,31 @@ export function createFeedSnapshotService({
   }
 
   function processFeedEvents(events: NostrEvent[], relayHintsByEventId: RelayHintsByEventId = new Map()): ProcessedFeedEvent[] {
+    const eventById = buildEventById(events);
     const repliesByParent = buildRepliesByParent(events);
-    const seenPubkeys = new Set<string>();
-    const posts: NostrEvent[] = [];
+    const powRelaySet = new Set(powRelays.map(normalizeRelayUrl));
+    const since = sinceFromAgeHours(ageHours);
+    const eligibleRootIds = new Set<string>();
 
     events.forEach((event) => {
-      if (!isRootNote(event)) return;
-      if (seenPubkeys.has(event.pubkey)) return;
+      if (event.kind !== 1) return;
+      if (event.created_at < since) return;
       if (eventPow(event) < minPow) return;
-      seenPubkeys.add(event.pubkey);
-      posts.push(event);
+
+      const sourceRelayHints =
+        relayHintsByEventId.get(event.id) || relayHintsByEventId.get(normalizeEventId(event.id)) || [];
+      const seenOnPowRelay = sourceRelayHints.some((relay) =>
+        powRelaySet.has(normalizeRelayUrl(relay)),
+      );
+      if (!seenOnPowRelay) return;
+
+      const resolvedRoot = traceRootRefFromKnownEvents(event, eventById, rootResolutionDepth);
+      if (resolvedRoot) eligibleRootIds.add(resolvedRoot.ref.id);
     });
+
+    const posts = [...eligibleRootIds]
+      .map((rootId) => eventById.get(rootId))
+      .filter((event): event is NostrEvent => Boolean(event));
 
     return posts
       .map((postEvent) => {
