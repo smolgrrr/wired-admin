@@ -20,12 +20,31 @@ export function countLeadingZeroBits(hex: string): number {
   return count;
 }
 
+function nonceTarget(event: Partial<Event>): number | null {
+  const nonceTag = Array.isArray(event.tags)
+    ? event.tags.find((tag) => Array.isArray(tag) && tag[0] === "nonce")
+    : undefined;
+  const claimedTarget = Number.parseInt(nonceTag?.[2] || "", 10);
+  return nonceTag && !Number.isNaN(claimedTarget) ? claimedTarget : null;
+}
+
 export function eventPow(event: unknown): number {
   const candidate = event as Partial<Event> | null;
-  if (!candidate || typeof candidate !== "object" || typeof candidate.id !== "string") {
+  if (!candidate || typeof candidate !== "object") {
     return 0;
   }
-  return countLeadingZeroBits(candidate.id);
+
+  let hash;
+  try {
+    hash = getEventHash(candidate as Event);
+  } catch {
+    return 0;
+  }
+
+  const claimedTarget = nonceTarget(candidate);
+  if (claimedTarget === null) return 0;
+
+  return Math.min(countLeadingZeroBits(hash), claimedTarget);
 }
 
 export function verifyPow(event: unknown, requiredPow: number): PowResult {
@@ -41,35 +60,35 @@ export function verifyPow(event: unknown, requiredPow: number): PowResult {
   }
 
   const candidate = event as Partial<Event>;
+  const claimedTarget = nonceTarget(candidate);
+  const effectivePow =
+    claimedTarget === null ? 0 : Math.min(countLeadingZeroBits(hash), claimedTarget);
+
   if (hash !== candidate.id) {
     return {
       ok: false,
       reason: "event id does not match event hash",
-      pow: countLeadingZeroBits(hash),
+      pow: effectivePow,
     };
   }
 
   const pow = countLeadingZeroBits(hash);
-  const nonceTag = Array.isArray(candidate.tags)
-    ? candidate.tags.find((tag) => Array.isArray(tag) && tag[0] === "nonce")
-    : undefined;
-  const claimedTarget = Number.parseInt(nonceTag?.[2] || "", 10);
 
-  if (!nonceTag || Number.isNaN(claimedTarget)) {
-    return { ok: false, reason: "missing nonce tag", pow };
+  if (claimedTarget === null) {
+    return { ok: false, reason: "missing nonce tag", pow: 0 };
   }
 
   if (claimedTarget < requiredPow) {
     return {
       ok: false,
       reason: `nonce target ${claimedTarget} is below ${requiredPow}`,
-      pow,
+      pow: effectivePow,
     };
   }
 
   if (pow < requiredPow) {
-    return { ok: false, reason: `proof ${pow} is below ${requiredPow}`, pow };
+    return { ok: false, reason: `proof ${pow} is below ${requiredPow}`, pow: effectivePow };
   }
 
-  return { ok: true, reason: "", pow };
+  return { ok: true, reason: "", pow: effectivePow };
 }

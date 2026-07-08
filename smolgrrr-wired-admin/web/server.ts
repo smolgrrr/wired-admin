@@ -215,7 +215,7 @@ const relayInfo: RelayInfo = {
   software:
     process.env.RELAY_SOFTWARE ||
     "https://github.com/smolgrrr/wired-admin",
-  version: process.env.RELAY_VERSION || "0.2.11",
+  version: process.env.RELAY_VERSION || "0.2.12",
   limitation: {
     auth_required: false,
     payment_required: false,
