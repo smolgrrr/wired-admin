@@ -92,6 +92,11 @@ async function discoverAppStoreDir() {
 }
 
 async function fastForwardCheckout(repoDir) {
+  if (boolEnv("WIRED_ADMIN_SYNC_PACKAGE_TO_APP_STORE")) {
+    log("Skipping app-store git update because WIRED_ADMIN_SYNC_PACKAGE_TO_APP_STORE is set.");
+    return;
+  }
+
   if (boolEnv("WIRED_ADMIN_SKIP_GIT_UPDATE")) {
     log("Skipping app-store git update because WIRED_ADMIN_SKIP_GIT_UPDATE is set.");
     return;
@@ -218,6 +223,35 @@ function updateScalarInBlock(lines, block, key, value, {quote = true} = {}) {
   fail(`Could not update ${key} in docker-compose.yml.`);
 }
 
+function updateTopLevelScalar(text, key, value, {quote = true} = {}) {
+  const newline = text.includes("\r\n") ? "\r\n" : "\n";
+  const trailingNewline = text.endsWith("\n");
+  const lines = text.split(/\r?\n/);
+  if (trailingNewline) lines.pop();
+
+  const pattern = yamlKeyPattern(key);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lineIndent(lines[i]) !== 0) continue;
+    const match = lines[i].match(pattern);
+    if (!match) continue;
+    const rendered = quote ? quoteYamlString(value) : String(value);
+    lines[i] = `${match[1]}${key}: ${rendered}`;
+    return `${lines.join(newline)}${trailingNewline ? newline : ""}`;
+  }
+
+  fail(`Could not update top-level ${key} in umbrel-app.yml.`);
+}
+
+function prefixedEnvironmentOverrides() {
+  const prefix = "WIRED_ADMIN_SET_";
+  return Object.fromEntries(
+    Object.entries(env)
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, value]) => [key.slice(prefix.length), value || ""])
+      .sort(([a], [b]) => a.localeCompare(b)),
+  );
+}
+
 function getComposeTarget(composeText) {
   const lines = composeText.split(/\r?\n/);
   const web = findWebServiceBlock(lines);
@@ -227,6 +261,7 @@ function getComposeTarget(composeText) {
   return {
     image: readScalarInBlock(lines, web, "image"),
     relayVersion: readScalarInBlock(lines, envBlock, "RELAY_VERSION"),
+    environment: prefixedEnvironmentOverrides(),
   };
 }
 
@@ -242,6 +277,9 @@ function updateInstalledCompose(composeText, target) {
 
   updateScalarInBlock(lines, web, "image", target.image, {quote: false});
   updateScalarInBlock(lines, envBlock, "RELAY_VERSION", target.relayVersion, {quote: true});
+  for (const [key, value] of Object.entries(target.environment)) {
+    updateScalarInBlock(lines, envBlock, key, value, {quote: true});
+  }
 
   return `${lines.join(newline)}${trailingNewline ? newline : ""}`;
 }
@@ -270,6 +308,29 @@ async function backupInstalledFiles(stamp) {
   return backupDir;
 }
 
+async function syncPackageToAppStore(appStoreDir, sourcePackageDir) {
+  if (!boolEnv("WIRED_ADMIN_SYNC_PACKAGE_TO_APP_STORE")) return;
+
+  const targetPackageDir = path.join(appStoreDir, appId);
+  if (path.resolve(sourcePackageDir) === path.resolve(targetPackageDir)) {
+    log("Package source is already inside the app-store checkout.");
+    return;
+  }
+
+  if (!(await pathExists(sourcePackageDir))) {
+    fail(`Source package directory not found at ${sourcePackageDir}.`);
+  }
+
+  if (dryRun) {
+    log(`Dry run enabled; would sync ${sourcePackageDir} to ${targetPackageDir}.`);
+    return;
+  }
+
+  await fs.rm(targetPackageDir, {recursive: true, force: true});
+  await fs.cp(sourcePackageDir, targetPackageDir, {recursive: true});
+  log(`Synced ${appId} package into Umbrel app-store checkout.`);
+}
+
 async function writeFileAtomic(filePath, content) {
   const tempPath = `${filePath}.tmp-${process.pid}`;
   const stat = await fs.stat(filePath);
@@ -287,6 +348,45 @@ async function callUmbreld(args) {
   });
   if (!result.stdout) return null;
   return JSON.parse(result.stdout);
+}
+
+async function ensureAppStoreRepository() {
+  const repositoryUrl = env.WIRED_ADMIN_APP_STORE_REPOSITORY_URL;
+  if (!repositoryUrl) return;
+
+  if (dryRun) {
+    log(`Dry run enabled; would register Umbrel app-store repository ${repositoryUrl}.`);
+    return;
+  }
+
+  log(`Registering Umbrel app-store repository ${repositoryUrl}.`);
+  try {
+    await callUmbreld(["appStore.addRepository.mutate", JSON.stringify({url: repositoryUrl})]);
+  } catch (error) {
+    if (error.message.includes("already exists")) {
+      log(`Umbrel app-store repository already registered: ${repositoryUrl}`);
+      return;
+    }
+    throw error;
+  }
+}
+
+async function ensureAppInstalled() {
+  const state = await callUmbreld(["apps.state.query", "--appId", appId]).catch((error) => ({error: error.message}));
+  if (state?.state && state.state !== "not-installed") {
+    log(`${appId} is already installed with state ${state.state}.`);
+    return true;
+  }
+
+  if (dryRun) {
+    log(`Dry run enabled; would install ${appId} through Umbrel tRPC.`);
+    return false;
+  }
+
+  log(`Installing ${appId} through Umbrel tRPC.`);
+  const installed = await callUmbreld(["apps.install.mutate", "--appId", appId]);
+  if (installed !== true) fail(`Umbrel install returned ${JSON.stringify(installed)}.`);
+  return true;
 }
 
 async function restartApp() {
@@ -381,10 +481,15 @@ async function smokePublicEndpoints() {
 }
 
 async function main() {
+  await ensureAppStoreRepository();
+
   const appStoreDir = await discoverAppStoreDir();
   await fastForwardCheckout(appStoreDir);
 
-  const packageDir = env.WIRED_ADMIN_PACKAGE_DIR || path.join(appStoreDir, appId);
+  const sourcePackageDir = env.WIRED_ADMIN_SOURCE_PACKAGE_DIR || env.WIRED_ADMIN_PACKAGE_DIR || path.join(appStoreDir, appId);
+  await syncPackageToAppStore(appStoreDir, sourcePackageDir);
+
+  const packageDir = env.WIRED_ADMIN_PACKAGE_DIR || sourcePackageDir;
   const packageComposePath = path.join(packageDir, "docker-compose.yml");
   const packageManifestPath = path.join(packageDir, "umbrel-app.yml");
   const installedComposePath = path.join(appDataDir, "docker-compose.yml");
@@ -393,6 +498,8 @@ async function main() {
   const packageCompose = await fs.readFile(packageComposePath, "utf8");
   const packageManifest = await fs.readFile(packageManifestPath, "utf8");
   const target = getComposeTarget(packageCompose);
+  target.image = env.WIRED_ADMIN_IMAGE_OVERRIDE || target.image;
+  target.relayVersion = env.WIRED_ADMIN_RELAY_VERSION_OVERRIDE || target.relayVersion;
   const manifestVersion = readTopLevelYamlScalar(packageManifest, "version");
 
   if (manifestVersion !== target.relayVersion && !boolEnv("WIRED_ADMIN_ALLOW_VERSION_MISMATCH")) {
@@ -401,9 +508,21 @@ async function main() {
 
   log(`Target image: ${target.image}`);
   log(`Target version: ${target.relayVersion}`);
+  if (Object.keys(target.environment).length > 0) {
+    log(`Compose environment overrides: ${Object.keys(target.environment).join(", ")}`);
+  }
+
+  const appInstalled = await ensureAppInstalled();
+  if (!appInstalled) {
+    log("Dry run stopped before installed app file inspection because the app is not installed yet.");
+    return;
+  }
 
   const installedCompose = await fs.readFile(installedComposePath, "utf8");
   const updatedCompose = updateInstalledCompose(installedCompose, target);
+  const updatedManifest = env.WIRED_ADMIN_MANIFEST_VERSION_OVERRIDE || env.WIRED_ADMIN_RELAY_VERSION_OVERRIDE
+    ? updateTopLevelScalar(packageManifest, "version", env.WIRED_ADMIN_MANIFEST_VERSION_OVERRIDE || target.relayVersion, {quote: true})
+    : packageManifest;
 
   if (dryRun) {
     log("Dry run enabled; no installed files were changed, no backups were created, and no restart was requested.");
@@ -420,7 +539,7 @@ async function main() {
     log("Installed docker-compose.yml already has the target image and RELAY_VERSION.");
   }
 
-  await fs.copyFile(packageManifestPath, installedManifestPath);
+  await writeFileAtomic(installedManifestPath, updatedManifest);
   log("Copied package umbrel-app.yml into installed app data.");
 
   await restartApp();

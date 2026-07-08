@@ -38,6 +38,7 @@ import type {
   RelayInfo,
   RelayRecentActivity,
   RelayStats,
+  WiredAccountStatus,
 } from "./src/contracts/api.js";
 import type { NostrEvent } from "./src/contracts/nostr.js";
 import type {
@@ -45,8 +46,17 @@ import type {
   ConfessStore,
   ConfessXCustomEmoji,
   ConfessXMirror,
+  WiredAccountPostRecord,
+  WiredAccountStore,
 } from "./src/contracts/stores.js";
-import { isNostrEvent, parseConfessStore } from "./src/contracts/validation.js";
+import {
+  isNostrEvent,
+  isNostrProofEvent,
+  parseConfessStore,
+  parseWiredAccountStore,
+} from "./src/contracts/validation.js";
+
+type NostrProofEvent = Omit<NostrEvent, "sig"> & { sig?: string };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(__dirname, "..");
@@ -62,6 +72,8 @@ const moderationStoreFile =
   process.env.WIRED_MODERATION_STORE || path.join(dataDir, "moderation.json");
 const confessStoreFile =
   process.env.CONFESS_STORE_FILE || path.join(dataDir, "confess.json");
+const wiredAccountStoreFile =
+  process.env.WIRED_ACCOUNT_STORE_FILE || path.join(dataDir, "wired-account.json");
 const refreshSeconds = Number(process.env.FEED_SNAPSHOT_REFRESH_SECONDS || 300);
 const snapshotAgeHours = Number(process.env.FEED_SNAPSHOT_AGE_HOURS || 24);
 const snapshotTimeoutMs = Number(process.env.FEED_SNAPSHOT_TIMEOUT_MS || 12_000);
@@ -82,16 +94,31 @@ const enrichmentRelays = readEnvList("ENRICHMENT_RELAYS", [
 ]);
 const threadRelays = [...new Set([...powRelays, ...enrichmentRelays])];
 const confessRelays = readEnvList("CONFESS_RELAYS", [backendUrl, ...threadRelays]);
+const wiredAccountRelays = readEnvList("WIRED_ACCOUNT_RELAYS", confessRelays);
 const confessDailyLimit = Math.max(1, Number(process.env.CONFESS_DAILY_LIMIT || 6));
 const confessBasePow = Math.max(minPow, Number(process.env.CONFESS_MIN_POW || minPow));
+const wiredAccountMinPow = Math.max(
+  minPow,
+  Number(process.env.WIRED_ACCOUNT_MIN_POW || process.env.CONFESS_MIN_POW || minPow) || minPow,
+);
 const confessMaxPow = Math.max(confessBasePow, Number(process.env.CONFESS_MAX_POW || 28));
 const confessContentMaxLength = Math.max(
   1,
   Number(process.env.CONFESS_CONTENT_MAX_LENGTH || 2000),
 );
+const wiredAccountContentMaxLength = Math.max(
+  1,
+  Number(process.env.WIRED_ACCOUNT_CONTENT_MAX_LENGTH || confessContentMaxLength) ||
+    confessContentMaxLength,
+);
 const confessPublishTimeoutMs = Math.max(
   1000,
   Number(process.env.CONFESS_PUBLISH_TIMEOUT_MS || 8000),
+);
+const wiredAccountPublishTimeoutMs = Math.max(
+  1000,
+  Number(process.env.WIRED_ACCOUNT_PUBLISH_TIMEOUT_MS || confessPublishTimeoutMs) ||
+    confessPublishTimeoutMs,
 );
 const confessXRetrySeconds = Math.max(30, Number(process.env.CONFESS_X_RETRY_SECONDS || 300));
 const confessXMaxAttempts = Math.max(1, Number(process.env.CONFESS_X_MAX_ATTEMPTS || 6));
@@ -224,6 +251,7 @@ const stats: RelayStats = {
 };
 
 let confessLedgerQueue: Promise<unknown> = Promise.resolve();
+let wiredAccountStoreQueue: Promise<unknown> = Promise.resolve();
 let confessXMirrorTimer: NodeJS.Timeout | null = null;
 const confessXMirrorInFlight = new Set<string>();
 
@@ -267,6 +295,24 @@ async function writeConfessStore(data: ConfessStore): Promise<void> {
   const temp = `${confessStoreFile}.${process.pid}.tmp`;
   await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   await rename(temp, confessStoreFile);
+}
+
+async function readWiredAccountStore(): Promise<WiredAccountStore> {
+  try {
+    const parsed = JSON.parse(await readFile(wiredAccountStoreFile, "utf8"));
+    const store = parseWiredAccountStore(parsed);
+    if (store) return store;
+  } catch {
+    // Missing or malformed stores are treated as empty.
+  }
+  return { version: 1, posts: [] };
+}
+
+async function writeWiredAccountStore(data: WiredAccountStore): Promise<void> {
+  await mkdir(path.dirname(wiredAccountStoreFile), { recursive: true });
+  const temp = `${wiredAccountStoreFile}.${process.pid}.tmp`;
+  await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  await rename(temp, wiredAccountStoreFile);
 }
 
 function todaysConfessPosts(store: ConfessStore, now = Date.now()): ConfessPostRecord[] {
@@ -321,9 +367,29 @@ function confessStatusFromStore(store: ConfessStore, now = Date.now()): ConfessS
   };
 }
 
+function wiredAccountStatusFromStore(store: WiredAccountStore): WiredAccountStatus & {
+  count: number;
+} {
+  const secretKey = parseWiredAccountSecretKey();
+  return {
+    configured: Boolean(secretKey),
+    pubkey: secretKey ? getPublicKey(secretKey) : "",
+    minimumPow: wiredAccountMinPow,
+    relays: wiredAccountRelays,
+    maxContentLength: wiredAccountContentMaxLength,
+    count: store.posts.length,
+  };
+}
+
 function withConfessLedgerLock<T>(task: () => Promise<T>): Promise<T> {
   const run = confessLedgerQueue.then(task, task);
   confessLedgerQueue = run.catch(() => {});
+  return run;
+}
+
+function withWiredAccountStoreLock<T>(task: () => Promise<T>): Promise<T> {
+  const run = wiredAccountStoreQueue.then(task, task);
+  wiredAccountStoreQueue = run.catch(() => {});
   return run;
 }
 
@@ -338,8 +404,8 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
-function parseConfessSecretKey(): Uint8Array | null {
-  const raw = String(process.env.CONFESS_NOSTR_SECRET_KEY || "").trim();
+function parseNostrSecretKey(rawValue: unknown): Uint8Array | null {
+  const raw = String(rawValue || "").trim();
   if (!raw) return null;
 
   try {
@@ -352,6 +418,16 @@ function parseConfessSecretKey(): Uint8Array | null {
   } catch {
     return null;
   }
+}
+
+function parseConfessSecretKey(): Uint8Array | null {
+  return parseNostrSecretKey(process.env.CONFESS_NOSTR_SECRET_KEY);
+}
+
+function parseWiredAccountSecretKey(): Uint8Array | null {
+  return parseNostrSecretKey(
+    process.env.WIRED_NOSTR_SECRET_KEY || process.env.CONFESS_NOSTR_SECRET_KEY,
+  );
 }
 
 const disallowedConfessContentPattern =
@@ -401,22 +477,84 @@ function validateConfessAdmission(
   return { ok: true, reason: "", pow: result.pow };
 }
 
-function buildConfessionEvent(admissionEvent: NostrEvent, secretKey: Uint8Array): NostrEvent {
+function validateWiredAccountAdmission(
+  event: NostrProofEvent,
+  requiredPow: number,
+  wiredAccountPubkey: string,
+): ConfessAdmissionResult {
+  const result = verifyEventPow(event, requiredPow);
+  if (!result.ok) return { ok: false, reason: result.reason, pow: result.pow };
+
+  if (event.pubkey !== wiredAccountPubkey) {
+    return { ok: false, reason: "proof pubkey does not match Wired account", pow: result.pow };
+  }
+
+  if (event.kind !== 1) {
+    return { ok: false, reason: "proof must be kind 1", pow: result.pow };
+  }
+
+  const nonceTag = event.tags.find((tag) => tag[0] === "nonce");
+  if (
+    !nonceTag ||
+    !/^\d+$/.test(nonceTag[1] || "") ||
+    !/^\d+$/.test(nonceTag[2] || "")
+  ) {
+    return { ok: false, reason: "invalid nonce tag", pow: result.pow };
+  }
+
+  const claimedTarget = Number.parseInt(nonceTag[2] || "", 10);
+  if (claimedTarget < requiredPow) {
+    return {
+      ok: false,
+      reason: `nonce target ${claimedTarget} is below ${requiredPow}`,
+      pow: result.pow,
+    };
+  }
+
+  const content = String(event.content || "");
+  if (!content.trim()) {
+    return { ok: false, reason: "empty post", pow: result.pow };
+  }
+
+  if (content.length > wiredAccountContentMaxLength) {
+    return {
+      ok: false,
+      reason: `post exceeds ${wiredAccountContentMaxLength} characters`,
+      pow: result.pow,
+    };
+  }
+
+  return { ok: true, reason: "", pow: result.pow };
+}
+
+function buildSignedAccountEvent(
+  admissionEvent: NostrProofEvent,
+  secretKey: Uint8Array,
+  { trimContent = false }: { trimContent?: boolean } = {},
+): NostrEvent {
   const template: EventTemplate = {
     kind: admissionEvent.kind,
-    content: admissionEvent.content.trim(),
+    content: trimContent ? admissionEvent.content.trim() : admissionEvent.content,
     tags: admissionEvent.tags,
     created_at: admissionEvent.created_at,
   };
   return finalizeEvent(template, secretKey);
 }
 
-async function publishConfessionEvent(event: NostrEvent): Promise<string[]> {
+function buildConfessionEvent(admissionEvent: NostrEvent, secretKey: Uint8Array): NostrEvent {
+  return buildSignedAccountEvent(admissionEvent, secretKey, { trimContent: true });
+}
+
+async function publishNostrEvent(
+  event: NostrEvent,
+  relays: string[],
+  timeoutMs: number,
+): Promise<string[]> {
   const results = await Promise.allSettled(
-    confessRelays.map(async (url) => {
-      const relay = await withPromiseTimeout(Relay.connect(url), confessPublishTimeoutMs, url);
+    relays.map(async (url) => {
+      const relay = await withPromiseTimeout(Relay.connect(url), timeoutMs, url);
       try {
-        await withPromiseTimeout(relay.publish(event), confessPublishTimeoutMs, url);
+        await withPromiseTimeout(relay.publish(event), timeoutMs, url);
         return normalizeRelayUrl(relay.url || url);
       } finally {
         try {
@@ -433,6 +571,14 @@ async function publishConfessionEvent(event: NostrEvent): Promise<string[]> {
       .filter((result) => result.status === "fulfilled")
       .map((result) => result.value),
   );
+}
+
+async function publishConfessionEvent(event: NostrEvent): Promise<string[]> {
+  return publishNostrEvent(event, confessRelays, confessPublishTimeoutMs);
+}
+
+async function publishWiredAccountEvent(event: NostrEvent): Promise<string[]> {
+  return publishNostrEvent(event, wiredAccountRelays, wiredAccountPublishTimeoutMs);
 }
 
 function confessXConfigured(): boolean {
@@ -994,6 +1140,83 @@ function publicConfessXMirror(mirror: ConfessXMirror | undefined): PublicConfess
   return result;
 }
 
+async function createWiredAccountPost(admissionEvent: unknown) {
+  const secretKey = parseWiredAccountSecretKey();
+  if (!secretKey) {
+    const error: HttpError = new Error("Wired account is not configured");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  if (!isNostrProofEvent(admissionEvent)) {
+    const error: HttpError = new Error("invalid Wired account proof event");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return withWiredAccountStoreLock(async () => {
+    const store = await readWiredAccountStore();
+    const wiredAccountPubkey = getPublicKey(secretKey);
+    const proof = validateWiredAccountAdmission(
+      admissionEvent,
+      wiredAccountMinPow,
+      wiredAccountPubkey,
+    );
+    if (!proof.ok) {
+      const error: HttpError = new Error(proof.reason);
+      error.statusCode = 400;
+      error.pow = proof.pow;
+      throw error;
+    }
+
+    if (store.posts.some((post) => post.proofId === admissionEvent.id)) {
+      const error: HttpError = new Error("Wired account proof has already been used");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const event = buildSignedAccountEvent(admissionEvent, secretKey);
+    if (event.id !== admissionEvent.id) {
+      const error: HttpError = new Error("signed event id does not match proof event id");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (store.posts.some((post) => post.eventId === event.id)) {
+      const error: HttpError = new Error("Wired account event has already been published");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const acceptedRelays = await publishWiredAccountEvent(event);
+    if (acceptedRelays.length === 0) {
+      const error: HttpError = new Error("no relay accepted the Wired account post");
+      error.statusCode = 502;
+      throw error;
+    }
+
+    const record: WiredAccountPostRecord = {
+      day: utcDayKey(),
+      eventId: event.id,
+      proofId: admissionEvent.id,
+      pow: proof.pow,
+      createdAt: Date.now(),
+      pubkey: event.pubkey,
+      contentLength: event.content.length,
+      acceptedRelays,
+      relays: wiredAccountRelays,
+    };
+    store.posts.push(record);
+    await writeWiredAccountStore(store);
+
+    return {
+      event,
+      acceptedRelays,
+      minimumPow: wiredAccountMinPow,
+    };
+  });
+}
+
 async function createConfession(admissionEvent: unknown) {
   const secretKey = parseConfessSecretKey();
   if (!secretKey) {
@@ -1095,6 +1318,7 @@ registerHttpRoutes(app, {
   confessXImageWidth,
   confessXStatusFromStore,
   createConfession,
+  createWiredAccountPost,
   feedSnapshot,
   isAdminAuthorized: httpAccess.isAdminAuthorized,
   isCronAuthorized: httpAccess.isCronAuthorized,
@@ -1103,9 +1327,12 @@ registerHttpRoutes(app, {
   parseConfessSecretKey,
   publicDir,
   readConfessStore,
+  readWiredAccountStore,
   relayInfo,
   renderConfessXImage,
   stats,
+  wiredAccountStatusFromStore,
+  wiredAccountStoreFile,
 });
 
 server.on("upgrade", (request: IncomingMessage, socket: Socket, head: Buffer) => {

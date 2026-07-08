@@ -78,7 +78,9 @@ jobs:
       name: staging
       url: https://staging.wiredsignal.online
     env:
-      STAGING_PATH: ${{ vars.STAGING_PATH || '/home/umbrel/wired-admin-staging' }}
+      STAGING_APP_ID: smolgrrr-wired-admin-staging
+      STAGING_APP_STORE_DIR: ${{ vars.STAGING_APP_STORE_DIR || '/home/umbrel/umbrel/app-stores/smolgrrr-wired-admin-github-957d0d1c' }}
+      STAGING_PORT: ${{ vars.STAGING_PORT || '3002' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,41 +89,42 @@ jobs:
         run: |
           if [ -n "${{ inputs.image_tag }}" ]; then
             echo "IMAGE_REF=${IMAGE_NAME}:${{ inputs.image_tag }}" >> "$GITHUB_ENV"
+            echo "DEPLOY_VERSION=${{ inputs.image_tag }}" >> "$GITHUB_ENV"
           else
             echo "IMAGE_REF=${{ needs.build.outputs.image_ref }}" >> "$GITHUB_ENV"
+            echo "DEPLOY_VERSION=${{ needs.build.outputs.image_tag }}" >> "$GITHUB_ENV"
           fi
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Prepare staging assets
+      - name: Deploy staging Umbrel app
+        env:
+          UMBREL_DIR: ${{ vars.STAGING_UMBREL_DIR || '/home/umbrel/umbrel' }}
+          UMBREL_TRPC_ENDPOINT: ${{ vars.STAGING_UMBREL_TRPC_ENDPOINT || 'http://localhost/trpc' }}
+          WIRED_ADMIN_APP_ID: ${{ env.STAGING_APP_ID }}
+          WIRED_ADMIN_APP_STORE_REPOSITORY_URL: https://github.com/smolgrrr/wired-admin.git
+          WIRED_ADMIN_APP_STORE_DIR: ${{ env.STAGING_APP_STORE_DIR }}
+          WIRED_ADMIN_SOURCE_PACKAGE_DIR: smolgrrr-wired-admin-staging
+          WIRED_ADMIN_SYNC_PACKAGE_TO_APP_STORE: "1"
+          WIRED_ADMIN_MANIFEST_VERSION_OVERRIDE: staging
+          WIRED_ADMIN_ALLOW_VERSION_MISMATCH: "1"
+          WIRED_ADMIN_LOCAL_BASE_URL: http://127.0.0.1:${{ env.STAGING_PORT }}
+          WIRED_ADMIN_PUBLIC_SMOKE_URLS: ${{ vars.STAGING_PUBLIC_SMOKE_URLS || '' }}
+          WIRED_ADMIN_SET_MODERATION_ADMIN_OPEN: "false"
+          WIRED_ADMIN_SET_MODERATION_ADMIN_TOKEN: ${{ secrets.STAGING_ADMIN_TOKEN }}
+          WIRED_ADMIN_SET_CRON_SECRET: ${{ secrets.STAGING_ADMIN_TOKEN }}
+          WIRED_ADMIN_SET_RELAY_MIN_POW: ${{ vars.STAGING_RELAY_MIN_POW || '16' }}
+          WIRED_ADMIN_SET_CONFESS_MIN_POW: ${{ vars.STAGING_RELAY_MIN_POW || '16' }}
+          WIRED_ADMIN_SET_WIRED_NOSTR_SECRET_KEY: ${{ secrets.STAGING_WIRED_NOSTR_SECRET_KEY }}
+          WIRED_ADMIN_SET_WIRED_ACCOUNT_MIN_POW: ${{ vars.STAGING_WIRED_ACCOUNT_MIN_POW || vars.STAGING_RELAY_MIN_POW || '16' }}
+          WIRED_ADMIN_SET_WIRED_ACCOUNT_RELAYS: ${{ vars.STAGING_WIRED_ACCOUNT_RELAYS || '' }}
+          WIRED_ADMIN_SET_FEED_SNAPSHOT_AGE_HOURS: ${{ vars.STAGING_FEED_SNAPSHOT_AGE_HOURS || '24' }}
+          WIRED_ADMIN_SET_FEED_SNAPSHOT_REFRESH_SECONDS: ${{ vars.STAGING_FEED_SNAPSHOT_REFRESH_SECONDS || '300' }}
         run: |
-          mkdir -p "${STAGING_PATH}/deploy" "${STAGING_PATH}/data/web" "${STAGING_PATH}/data/strfry"
-          cp deploy/staging/docker-compose.yml "${STAGING_PATH}/deploy/docker-compose.yml"
-          cp smolgrrr-wired-admin/strfry.conf "${STAGING_PATH}/deploy/strfry.conf"
-
-      - name: Deploy staging stack
-        run: |
-          cat > "${STAGING_PATH}/deploy/.env" <<EOF
-          WIRED_ADMIN_IMAGE=${IMAGE_REF}
-          WIRED_ADMIN_DATA_DIR=${STAGING_PATH}/data
-          WIRED_ADMIN_STRFRY_CONF=${STAGING_PATH}/deploy/strfry.conf
-          WIRED_ADMIN_STAGING_PORT=${{ vars.STAGING_PORT || '3001' }}
-          MODERATION_ADMIN_TOKEN=${{ secrets.STAGING_ADMIN_TOKEN }}
-          CRON_SECRET=${{ secrets.STAGING_ADMIN_TOKEN }}
-          RELAY_MIN_POW=${{ vars.STAGING_RELAY_MIN_POW || '16' }}
-          FEED_SNAPSHOT_AGE_HOURS=${{ vars.STAGING_FEED_SNAPSHOT_AGE_HOURS || '24' }}
-          FEED_SNAPSHOT_REFRESH_SECONDS=${{ vars.STAGING_FEED_SNAPSHOT_REFRESH_SECONDS || '300' }}
-          EOF
-          cd "${STAGING_PATH}/deploy"
-          docker compose --env-file .env -f docker-compose.yml pull
-          docker compose --env-file .env -f docker-compose.yml up -d --remove-orphans
+          export WIRED_ADMIN_IMAGE_OVERRIDE="${IMAGE_REF}"
+          export WIRED_ADMIN_RELAY_VERSION_OVERRIDE="${DEPLOY_VERSION}"
+          node scripts/deploy-wired-admin-umbrel.mjs
 
       - name: Smoke test staging
         env:
           STAGING_ADMIN_TOKEN: ${{ secrets.STAGING_ADMIN_TOKEN }}
-        run: scripts/staging-smoke-test.sh "$STAGING_BASE_URL"
+          STAGING_SMOKE_BASE_URL: ${{ vars.STAGING_SMOKE_BASE_URL || '' }}
+        run: scripts/staging-smoke-test.sh "${STAGING_SMOKE_BASE_URL:-http://127.0.0.1:${STAGING_PORT}}"

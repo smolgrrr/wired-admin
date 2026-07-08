@@ -32,6 +32,14 @@ function isPublicHttpRouteAllowed(req: Request): boolean {
     return req.method === "POST" || req.method === "OPTIONS";
   }
 
+  if (url.pathname === "/api/wired-account/status") {
+    return req.method === "GET" || req.method === "OPTIONS";
+  }
+
+  if (url.pathname === "/api/wired-account/posts") {
+    return req.method === "POST" || req.method === "OPTIONS";
+  }
+
   return false;
 }
 

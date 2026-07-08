@@ -1,5 +1,10 @@
 import type { NostrEvent, Pubkey, RelayHintsRecord, RelayUrl } from "./nostr.js";
-import type { ConfessStore, ConfessXMirror, ModerationAction } from "./stores.js";
+import type {
+  ConfessStore,
+  ConfessXMirror,
+  ModerationAction,
+  WiredAccountStore,
+} from "./stores.js";
 
 export type ProfileSummary = {
   name?: string;
@@ -115,6 +120,21 @@ export type CreateConfessionResponse = {
   xMirror: PublicConfessXMirror;
 };
 
+export type WiredAccountStatus = {
+  configured: boolean;
+  pubkey: string;
+  minimumPow: number;
+  relays: string[];
+  maxContentLength: number;
+};
+
+export type CreateWiredAccountPostResponse = {
+  ok: true;
+  event: NostrEvent;
+  acceptedRelays: string[];
+  minimumPow: number;
+};
+
 export type RelayInfo = {
   name: string;
   description: string;
@@ -183,6 +203,10 @@ export type StatusResponse = RelayStats & {
     linkedPubkey: string | null;
     xMirror: Record<string, unknown>;
   };
+  wiredAccount: WiredAccountStatus & {
+    storeFile: string;
+    count: number;
+  };
   moderation: {
     actionCount: number;
     manifest: ModerationManifest;
@@ -198,3 +222,7 @@ export type HttpError = Error & {
 };
 
 export type ConfessStatusFromStore = (store: ConfessStore, now?: number) => ConfessStatus;
+export type WiredAccountStatusFromStore = (
+  store: WiredAccountStore,
+  now?: number,
+) => WiredAccountStatus & { count: number };

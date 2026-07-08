@@ -89,3 +89,20 @@ export type ConfessStore = {
   version: 1;
   posts: ConfessPostRecord[];
 };
+
+export type WiredAccountPostRecord = {
+  eventId: EventId;
+  proofId: EventId;
+  day: string;
+  pow: number;
+  acceptedRelays: string[];
+  createdAt: number;
+  pubkey: Pubkey;
+  contentLength: number;
+  relays?: string[];
+};
+
+export type WiredAccountStore = {
+  version: 1;
+  posts: WiredAccountPostRecord[];
+};

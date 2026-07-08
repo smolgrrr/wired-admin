@@ -11,6 +11,7 @@ gateway that:
 - rejects publish attempts that do not meet the configured NIP-13 PoW floor,
 - serves a Wired feed bootstrap snapshot at `/api/feed/bootstrap`,
 - serves public client-side moderation filtering data at `/api/moderation/manifest`,
+- signs and publishes high-PoW Wired account posts at `/api/wired-account/posts`,
 - keeps moderation management actions local to the Umbrel app.
 
 Persistent app data is stored under Umbrel app data:
@@ -18,14 +19,39 @@ Persistent app data is stored under Umbrel app data:
 - `data/strfry` for the relay database,
 - `data/web/feed-bootstrap.json` for the feed snapshot cache,
 - `data/web/moderation.json` for moderation actions.
+- `data/web/wired-account.json` for Wired account post audit records.
 
 The community app enables `MODERATION_ADMIN_OPEN=true` for the local Umbrel
 console only. Hosts listed in `PUBLIC_HOSTS` cannot access the UI,
 `/api/status`, `/api/cron/refresh-feed`, or `/api/moderation/actions`. Public
-hosts only receive Nostr relay/NIP-11 traffic, `/api/feed/bootstrap`, and
-`/api/moderation/manifest`. `PUBLIC_HOSTS` supports exact hosts and suffix
-patterns such as `*.vercel.app` and `*.onion`; Vercel preview deployments are
-frontend origins and only need the public snapshot/manifest/relay endpoints.
+hosts only receive Nostr relay/NIP-11 traffic, `/api/feed/bootstrap`,
+`/api/moderation/manifest`, and the Wired account posting API. `PUBLIC_HOSTS`
+supports exact hosts and suffix patterns such as `*.vercel.app` and `*.onion`;
+Vercel preview deployments are frontend origins and only need the public
+snapshot/manifest/relay/account endpoints.
+
+## Wired Account Posts
+
+Wired clients mine a kind 1 Nostr event template whose `pubkey` is the Wired
+account pubkey. If the selected PoW target is at or above the configured
+threshold, the client submits `{ "event": ... }` to
+`POST /api/wired-account/posts`. Wired Admin verifies the NIP-13 nonce/proof,
+signs the same event template with the configured Wired account key, publishes
+it to relays, and records an audit entry.
+
+Runtime environment:
+
+- `WIRED_NOSTR_SECRET_KEY`: Wired account private key as `nsec` or 32-byte hex.
+  Do not commit a real value. If unset, the server falls back to
+  `CONFESS_NOSTR_SECRET_KEY` for migration.
+- `WIRED_ACCOUNT_MIN_POW`: minimum NIP-13 target/proof, falling back to
+  `CONFESS_MIN_POW` and then `RELAY_MIN_POW`.
+- `WIRED_ACCOUNT_RELAYS`: comma-separated publish relays, falling back to
+  Confess/thread relays.
+- `WIRED_ACCOUNT_CONTENT_MAX_LENGTH`: post length limit, defaulting to the
+  Confess content limit.
+- `WIRED_ACCOUNT_STORE_FILE`: audit store path, defaulting to
+  `data/web/wired-account.json` in the Umbrel app.
 
 ## Install
 
