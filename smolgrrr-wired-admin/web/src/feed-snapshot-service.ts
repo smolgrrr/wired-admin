@@ -37,6 +37,7 @@ type FeedSnapshotServiceOptions = {
   refreshSeconds: number;
   ageHours: number;
   timeoutMs: number;
+  replyLimit: number;
   replyFetchDepth: number;
   minPow: number;
   powRelays: RelayUrl[];
@@ -44,6 +45,8 @@ type FeedSnapshotServiceOptions = {
   threadRelays: RelayUrl[];
   moderation: ModerationService;
 };
+
+const replyParentBatchSize = 50;
 
 type FetchReplyClosureOptions = {
   relays: ConnectedRelay[];
@@ -323,14 +326,21 @@ function closeRelays(relays: ConnectedRelay[]): void {
   });
 }
 
-function buildReplyFilter(parentIds: string[], since: number): Filter | null {
-  const ids = parentIds.slice(0, 50);
-  if (ids.length === 0) return null;
+function chunkIds(ids: string[], batchSize: number): string[][] {
+  const chunks: string[][] = [];
+  for (let index = 0; index < ids.length; index += batchSize) {
+    chunks.push(ids.slice(index, index + batchSize));
+  }
+  return chunks;
+}
+
+function buildReplyFilter(parentIds: string[], since: number, replyLimit: number): Filter | null {
+  if (parentIds.length === 0) return null;
   return {
-    "#e": ids,
+    "#e": parentIds,
     kinds: [1],
     since,
-    limit: 100,
+    limit: replyLimit,
   };
 }
 
@@ -417,11 +427,34 @@ function parseProfileEvent(event: NostrEvent): ProfileSummary | null {
   }
 }
 
+function prioritizeRootIds(
+  rootIds: string[],
+  activityEvents: NostrEvent[],
+  eventById: Map<string, NostrEvent>,
+  rootResolutionDepth: number,
+): string[] {
+  const maxPowByRoot = new Map<string, number>();
+
+  activityEvents.forEach((event) => {
+    const trace = traceRootRefFromKnownEvents(event, eventById, rootResolutionDepth);
+    if (!trace) return;
+
+    const pow = eventPow(event);
+    const rootId = trace.ref.id;
+    maxPowByRoot.set(rootId, Math.max(maxPowByRoot.get(rootId) || 0, pow));
+  });
+
+  return [...rootIds].sort(
+    (left, right) => (maxPowByRoot.get(right) || 0) - (maxPowByRoot.get(left) || 0),
+  );
+}
+
 export function createFeedSnapshotService({
   cacheFile,
   refreshSeconds,
   ageHours,
   timeoutMs,
+  replyLimit,
   replyFetchDepth,
   minPow,
   powRelays,
@@ -505,24 +538,27 @@ export function createFeedSnapshotService({
     let nextParents = [...parentIds];
 
     for (let depth = 0; depth < replyFetchDepth && nextParents.length > 0; depth += 1) {
-      const replyFilter = buildReplyFilter(nextParents, since);
-      if (!replyFilter) break;
-
-      const replyBatch = await subscribeOnce(relays, replyFilter, relayUrls);
       const childParentIds: string[] = [];
 
-      replyBatch.relayHintsByEventId.forEach((relaysForEvent, eventId) => {
-        relaysForEvent.forEach((relay) => addRelayHint(replyRelayHintsByEventId, eventId, relay));
-      });
+      for (const parentChunk of chunkIds(nextParents, replyParentBatchSize)) {
+        const replyFilter = buildReplyFilter(parentChunk, since, replyLimit);
+        if (!replyFilter) continue;
 
-      replyBatch.events.forEach((event) => {
-        const eventId = normalizeEventId(event.id);
-        if (knownEventIds.has(eventId) || seenReplyIds.has(eventId)) return;
+        const replyBatch = await subscribeOnce(relays, replyFilter, relayUrls);
 
-        seenReplyIds.add(eventId);
-        replyEvents.push(event);
-        childParentIds.push(eventId);
-      });
+        replyBatch.relayHintsByEventId.forEach((relaysForEvent, eventId) => {
+          relaysForEvent.forEach((relay) => addRelayHint(replyRelayHintsByEventId, eventId, relay));
+        });
+
+        replyBatch.events.forEach((event) => {
+          const eventId = normalizeEventId(event.id);
+          if (knownEventIds.has(eventId) || seenReplyIds.has(eventId)) return;
+
+          seenReplyIds.add(eventId);
+          replyEvents.push(event);
+          childParentIds.push(eventId);
+        });
+      }
 
       nextParents = childParentIds;
     }
@@ -655,7 +691,15 @@ export function createFeedSnapshotService({
       );
       rootBatch.events.forEach((event) => knownEventIds.add(normalizeEventId(event.id)));
 
-      const rootIds = rootResolutionBatch.rootRefs.map((ref) => ref.id);
+      const eventById = buildEventById(
+        mergeEvents(activityBatch.events, rootResolutionBatch.events, rootBatch.events),
+      );
+      const rootIds = prioritizeRootIds(
+        rootResolutionBatch.rootRefs.map((ref) => ref.id),
+        qualifyingActivityEvents,
+        eventById,
+        rootResolutionDepth,
+      );
       const replyBatch = await fetchReplyClosure({
         relays,
         parentIds: rootIds,

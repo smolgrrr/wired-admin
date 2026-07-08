@@ -76,14 +76,20 @@ const wiredAccountStoreFile =
   process.env.WIRED_ACCOUNT_STORE_FILE || path.join(dataDir, "wired-account.json");
 const refreshSeconds = Number(process.env.FEED_SNAPSHOT_REFRESH_SECONDS || 300);
 const snapshotAgeHours = Number(process.env.FEED_SNAPSHOT_AGE_HOURS || 24);
-const snapshotTimeoutMs = Number(process.env.FEED_SNAPSHOT_TIMEOUT_MS || 12_000);
+const snapshotTimeoutMs = Number(process.env.FEED_SNAPSHOT_TIMEOUT_MS || 20_000);
+const snapshotReplyLimit = Math.max(1, Number(process.env.FEED_SNAPSHOT_REPLY_LIMIT || 500));
 const replyFetchDepth = Math.max(
   0,
   Math.min(Number(process.env.FEED_SNAPSHOT_REPLY_DEPTH || 2), 2),
 );
 
-const powRelays = readEnvList("POW_RELAYS", ["wss://powrelay.xyz", "wss://pow.relays.land"]);
+const powRelays = readEnvList("POW_RELAYS", [
+  "wss://relay.wiredsignal.online",
+  "wss://powrelay.xyz",
+  "wss://pow.relays.land",
+]);
 const enrichmentRelays = readEnvList("ENRICHMENT_RELAYS", [
+  "wss://relay.wiredsignal.online",
   "wss://relay.damus.io",
   "wss://offchain.pub",
   "wss://nos.lol",
@@ -92,7 +98,7 @@ const enrichmentRelays = readEnvList("ENRICHMENT_RELAYS", [
   "wss://nostr.wine",
   "wss://relay.snort.social",
 ]);
-const threadRelays = [...new Set([...powRelays, ...enrichmentRelays])];
+const threadRelays = [...new Set([backendUrl, ...powRelays, ...enrichmentRelays])];
 const confessRelays = readEnvList("CONFESS_RELAYS", [backendUrl, ...threadRelays]);
 const wiredAccountRelays = readEnvList("WIRED_ACCOUNT_RELAYS", confessRelays);
 const confessDailyLimit = Math.max(1, Number(process.env.CONFESS_DAILY_LIMIT || 6));
@@ -190,6 +196,7 @@ const feedSnapshot = createFeedSnapshotService({
   refreshSeconds,
   ageHours: snapshotAgeHours,
   timeoutMs: snapshotTimeoutMs,
+  replyLimit: snapshotReplyLimit,
   replyFetchDepth,
   minPow,
   powRelays,
