@@ -1,0 +1,25 @@
+manifestVersion: 1
+id: smolgrrr-wired-admin-staging
+category: social
+name: Wired Admin Staging
+icon: https://raw.githubusercontent.com/smolgrrr/wired-admin/main/smolgrrr-wired-admin-staging/icon.png
+version: "staging"
+tagline: Staging console for Wired relay, feed, and moderation
+description: >-
+  Wired Admin Staging runs an isolated strfry Nostr relay and admin API for
+  validating Wired client and admin changes before production rollout.
+
+developer: smolgrrr
+website: https://www.getwired.app/
+dependencies: []
+repo: https://github.com/smolgrrr/wired-admin
+support: https://github.com/smolgrrr/wired-admin/issues
+port: 3002
+gallery: []
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+deterministicPassword: false
+torOnly: false
+releaseNotes: >-
+  Staging Umbrel app for Wired Admin preview deployments.
