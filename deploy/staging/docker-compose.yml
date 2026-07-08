@@ -21,6 +21,10 @@ services:
       PUBLIC_HOSTS: ""
       FEED_SNAPSHOT_REFRESH_SECONDS: ${FEED_SNAPSHOT_REFRESH_SECONDS:-300}
       FEED_SNAPSHOT_AGE_HOURS: ${FEED_SNAPSHOT_AGE_HOURS:-24}
+      FEED_SNAPSHOT_TIMEOUT_MS: ${FEED_SNAPSHOT_TIMEOUT_MS:-20000}
+      FEED_SNAPSHOT_REPLY_LIMIT: ${FEED_SNAPSHOT_REPLY_LIMIT:-500}
+      POW_RELAYS: ${POW_RELAYS:-wss://staging.wiredsignal.online,wss://powrelay.xyz,wss://pow.relays.land}
+      ENRICHMENT_RELAYS: ${ENRICHMENT_RELAYS:-wss://staging.wiredsignal.online,wss://relay.damus.io,wss://offchain.pub,wss://nos.lol,wss://relay.primal.net,wss://relay.nostr.band,wss://nostr.wine,wss://relay.snort.social}
       RELAY_BACKEND_URL: ws://relay:7777
       RELAY_NAME: Wired Admin Staging
       RELAY_DESCRIPTION: Staging relay, feed snapshot service, and moderation console for Wired.
