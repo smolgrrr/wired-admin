@@ -463,7 +463,11 @@ function configuredPublicSmokeUrls() {
   }
   if (!env.WIRED_ADMIN_PUBLIC_BASE_URL) return [];
   const baseUrl = env.WIRED_ADMIN_PUBLIC_BASE_URL.replace(/\/+$/, "");
-  return [`${baseUrl}/api/confess/status`, `${baseUrl}/api/feed/bootstrap`];
+  return [
+    `${baseUrl}/api/confess/status`,
+    `${baseUrl}/api/feed/bootstrap`,
+    `${baseUrl}/api/wired-account/status`,
+  ];
 }
 
 async function smokePublicEndpoints() {
