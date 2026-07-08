@@ -3,7 +3,7 @@ id: smolgrrr-wired-admin
 category: social
 name: Wired Admin
 icon: https://raw.githubusercontent.com/smolgrrr/wired-admin/main/smolgrrr-wired-admin/icon.png
-version: "0.2.12"
+version: "0.2.13"
 tagline: Admin console for Wired relay, feed, and moderation
 description: >-
   Wired Admin runs a strfry Nostr relay behind a lightweight gateway that

@@ -730,7 +730,6 @@ export function createFeedSnapshotService({
     let rankingReplyCount = 0;
     const replyWork = replies.reduce((sum, reply) => {
       const difficulty = eventPow(reply);
-      if (difficulty < minPow) return sum;
       rankingReplyCount += 1;
       return sum + Math.pow(2, difficulty);
     }, 0);
