@@ -238,7 +238,7 @@ function traceRootRefFromKnownEvents(
 ): RootResolutionTrace | null {
   const direct = directRootRefCandidate(event);
   if (!direct) return null;
-  if (direct.definitive) return direct;
+  if (isRootNote(event)) return direct;
 
   const fallbackRef = direct.ref;
   let currentRef = direct.ref;
@@ -257,16 +257,16 @@ function traceRootRefFromKnownEvents(
       };
     }
 
-    const linkedRoot = directRootRefCandidate(linkedEvent);
-    if (!linkedRoot) break;
-
-    currentRef = mergeRefRelays(linkedRoot.ref, currentRef.relays);
-    if (linkedRoot.definitive) {
+    if (isRootNote(linkedEvent)) {
       return {
-        ref: currentRef,
+        ref: mergeRefRelays({ id: normalizeEventId(linkedEvent.id), relays: [] }, currentRef.relays),
         definitive: true,
       };
     }
+
+    const linkedRoot = directRootRefCandidate(linkedEvent);
+    if (!linkedRoot) break;
+    currentRef = mergeRefRelays(linkedRoot.ref, currentRef.relays);
   }
 
   return { ref: fallbackRef, definitive: false };
@@ -768,7 +768,7 @@ export function createFeedSnapshotService({
 
     const posts = [...eligibleRootIds]
       .map((rootId) => eventById.get(rootId))
-      .filter((event): event is NostrEvent => Boolean(event));
+      .filter((event): event is NostrEvent => (event ? isRootNote(event) : false));
 
     return posts
       .map((postEvent) => {
