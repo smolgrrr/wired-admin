@@ -1,6 +1,11 @@
 import type { FeedBootstrapSnapshot } from "./api.js";
 import type { NostrEvent } from "./nostr.js";
-import type { ConfessStore, ModerationActionInput, ModerationStore } from "./stores.js";
+import type {
+  ConfessStore,
+  ModerationActionInput,
+  ModerationStore,
+  WiredAccountStore,
+} from "./stores.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -19,6 +24,22 @@ export function isNostrEvent(value: unknown): value is NostrEvent {
     typeof value.created_at === "number" &&
     typeof value.kind === "number" &&
     typeof value.sig === "string" &&
+    Array.isArray(value.tags) &&
+    value.tags.every(isStringArray)
+  );
+}
+
+export function isNostrProofEvent(value: unknown): value is Omit<NostrEvent, "sig"> & {
+  sig?: string;
+} {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.pubkey === "string" &&
+    typeof value.content === "string" &&
+    typeof value.created_at === "number" &&
+    typeof value.kind === "number" &&
+    (value.sig === undefined || typeof value.sig === "string") &&
     Array.isArray(value.tags) &&
     value.tags.every(isStringArray)
   );
@@ -64,6 +85,11 @@ export function parseModerationStore(value: unknown): ModerationStore | null {
 export function parseConfessStore(value: unknown): ConfessStore | null {
   if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.posts)) return null;
   return value as ConfessStore;
+}
+
+export function parseWiredAccountStore(value: unknown): WiredAccountStore | null {
+  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.posts)) return null;
+  return value as WiredAccountStore;
 }
 
 export function parseModerationActionInput(value: unknown): ModerationActionInput {

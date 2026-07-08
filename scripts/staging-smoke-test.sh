@@ -34,5 +34,6 @@ retry "${base_url}/api/status"
 retry "${base_url}/api/feed/bootstrap"
 retry "${base_url}/healthz"
 retry "${base_url}/api/moderation/manifest"
+retry "${base_url}/api/wired-account/status"
 
 echo "staging smoke test passed: ${base_url}"

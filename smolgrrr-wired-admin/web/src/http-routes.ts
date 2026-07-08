@@ -6,14 +6,16 @@ import type {
   ConfessStatusFromStore,
   ConfessXStatus,
   CreateConfessionResponse,
+  CreateWiredAccountPostResponse,
   HttpError,
   RelayInfo,
   RelayStats,
+  WiredAccountStatusFromStore,
 } from "./contracts/api.js";
 import type { ConfessPostcardRenderResult } from "./confess-postcard-renderer.js";
 import type { FeedSnapshotService } from "./feed-snapshot-service.js";
 import type { ModerationService } from "./moderation.js";
-import type { ConfessStore } from "./contracts/stores.js";
+import type { ConfessStore, WiredAccountStore } from "./contracts/stores.js";
 
 type ConfessXConfigForRoutes = {
   enabled: boolean;
@@ -35,6 +37,9 @@ type RegisterHttpRoutesDeps = {
   confessXConfigured: () => boolean;
   confessXStatusFromStore: (store: ConfessStore) => ConfessXStatus & Record<string, unknown>;
   confessStatusFromStore: ConfessStatusFromStore;
+  createWiredAccountPost: (
+    event: unknown,
+  ) => Promise<Omit<CreateWiredAccountPostResponse, "ok">>;
   createConfession: (event: unknown) => Promise<Omit<CreateConfessionResponse, "ok">>;
   feedSnapshot: FeedSnapshotService;
   isAdminAuthorized: (req: Request) => boolean;
@@ -44,6 +49,7 @@ type RegisterHttpRoutesDeps = {
   parseConfessSecretKey: () => Uint8Array | null;
   publicDir: string;
   readConfessStore: () => Promise<ConfessStore>;
+  readWiredAccountStore: () => Promise<WiredAccountStore>;
   relayInfo: RelayInfo;
   renderConfessXImage: (input: {
     text: string;
@@ -52,6 +58,8 @@ type RegisterHttpRoutesDeps = {
     customEmojis?: { shortcode: string; url: string }[];
   }) => Promise<ConfessPostcardRenderResult>;
   stats: RelayStats;
+  wiredAccountStatusFromStore: WiredAccountStatusFromStore;
+  wiredAccountStoreFile: string;
 };
 
 export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDeps): void {
@@ -68,6 +76,7 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
     confessXAuthMode,
     confessXConfigured,
     confessXStatusFromStore,
+    createWiredAccountPost,
     createConfession,
     feedSnapshot,
     isAdminAuthorized,
@@ -77,15 +86,19 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
     parseConfessSecretKey,
     publicDir,
     readConfessStore,
+    readWiredAccountStore,
     relayInfo,
     renderConfessXImage,
     stats,
+    wiredAccountStatusFromStore,
+    wiredAccountStoreFile,
   } = deps;
 
   app.get("/api/status", async (_req: Request, res: Response) => {
     const actions = await moderation.getActions();
     const manifest = moderation.manifestFromActions(actions);
     const confessStore = await readConfessStore();
+    const wiredAccountStore = await readWiredAccountStore();
     const confessSecretKey = parseConfessSecretKey();
     res.json({
       ...stats,
@@ -98,6 +111,10 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
         relays: confessRelays,
         linkedPubkey: confessSecretKey ? getPublicKey(confessSecretKey) : null,
         xMirror: confessXStatusFromStore(confessStore),
+      },
+      wiredAccount: {
+        ...wiredAccountStatusFromStore(wiredAccountStore),
+        storeFile: wiredAccountStoreFile,
       },
       moderation: {
         actionCount: actions.length,
@@ -176,6 +193,26 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
         },
       },
     });
+  });
+
+  app.get("/api/wired-account/status", async (_req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.json(wiredAccountStatusFromStore(await readWiredAccountStore()));
+  });
+
+  app.post("/api/wired-account/posts", async (req: Request, res: Response) => {
+    try {
+      const result = await createWiredAccountPost(req.body?.event);
+      res.status(201).json({ ok: true, ...result });
+    } catch (error) {
+      const httpError = error as HttpError;
+      const statusCode =
+        typeof httpError.statusCode === "number" ? httpError.statusCode : 500;
+      res.status(statusCode).json({
+        error: error instanceof Error ? error.message : "wired account publish failed",
+        pow: typeof httpError.pow === "number" ? httpError.pow : undefined,
+      });
+    }
   });
 
   app.get("/api/confess/x-image-preview", async (req: Request, res: Response) => {

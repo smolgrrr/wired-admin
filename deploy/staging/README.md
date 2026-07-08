@@ -15,6 +15,8 @@ app. Staging exposes its web service on the Umbrel host, and the existing
 Create a protected `staging` environment with these secrets:
 
 - `STAGING_ADMIN_TOKEN`: admin API and cron token for staging
+- `STAGING_WIRED_NOSTR_SECRET_KEY`: staging-only Wired account private key as
+  `nsec` or 32-byte hex; do not reuse the production key
 
 Optional environment variables:
 
@@ -24,6 +26,9 @@ Optional environment variables:
 - `STAGING_RELAY_MIN_POW`: defaults to `16`
 - `STAGING_FEED_SNAPSHOT_AGE_HOURS`: defaults to `24`
 - `STAGING_FEED_SNAPSHOT_REFRESH_SECONDS`: defaults to `300`
+- `STAGING_WIRED_ACCOUNT_MIN_POW`: defaults to `STAGING_RELAY_MIN_POW`, then
+  `16`
+- `STAGING_WIRED_ACCOUNT_RELAYS`: optional comma-separated publish relays
 
 The deploy job runs on the existing self-hosted runner labels:
 
@@ -52,6 +57,8 @@ WIRED_ADMIN_STRFRY_CONF=/home/umbrel/wired-admin-staging/deploy/strfry.conf
 WIRED_ADMIN_STAGING_PORT=3001
 MODERATION_ADMIN_TOKEN=...
 CRON_SECRET=...
+WIRED_NOSTR_SECRET_KEY=...
+WIRED_ACCOUNT_MIN_POW=16
 ```
 
 Then deploy:
@@ -71,4 +78,5 @@ VITE_MODERATION_MANIFEST_URL=https://staging.wiredsignal.online/api/moderation/m
 VITE_POW_RELAYS=wss://staging.wiredsignal.online,wss://powrelay.xyz,wss://pow.relays.land
 VITE_ENRICHMENT_RELAYS=wss://staging.wiredsignal.online,wss://relay.damus.io,wss://offchain.pub,wss://nos.lol,wss://relay.primal.net,wss://relay.nostr.band,wss://nostr.wine,wss://relay.snort.social
 VITE_CONFESS_API_BASE=https://staging.wiredsignal.online
+VITE_WIRED_ACCOUNT_API_BASE=https://staging.wiredsignal.online
 ```
