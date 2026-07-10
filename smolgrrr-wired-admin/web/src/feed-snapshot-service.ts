@@ -118,6 +118,51 @@ function normalizeEventId(id: string): string {
   return id.toLowerCase();
 }
 
+function relayHintsRecordToMap(record: RelayHintsRecord | undefined): RelayHintsByEventId {
+  const relayHintsByEventId: RelayHintsByEventId = new Map();
+  Object.entries(record || {}).forEach(([eventId, relays]) => {
+    relays.forEach((relay) => addRelayHint(relayHintsByEventId, normalizeEventId(eventId), relay));
+  });
+  return relayHintsByEventId;
+}
+
+function cachedEventsForRefresh(
+  previousSnapshot: FeedBootstrapSnapshot | null,
+  since: number,
+): NostrEvent[] {
+  if (!previousSnapshot) return [];
+
+  const cachedRootIds = new Set(
+    (previousSnapshot.processedEvents || []).map((event) => normalizeEventId(event.postEventId)),
+  );
+
+  return Object.values(previousSnapshot.eventsById || {}).filter((event): event is NostrEvent => {
+    if (!isNostrEvent(event)) return false;
+    if (event.created_at >= since) return true;
+    return cachedRootIds.has(normalizeEventId(event.id));
+  });
+}
+
+function snapshotBatchForRefresh(previousSnapshot: FeedBootstrapSnapshot | null, since: number): RelayBatch {
+  return {
+    events: cachedEventsForRefresh(previousSnapshot, since),
+    relayHintsByEventId: relayHintsRecordToMap(previousSnapshot?.relayHintsByEventId),
+  };
+}
+
+function pickProfilesForPubkeys(
+  profiles: FeedBootstrapSnapshot["profiles"] | undefined,
+  pubkeys: Pubkey[],
+): Record<Pubkey, ProfileSummary> {
+  if (!profiles) return {};
+
+  return Object.fromEntries(
+    pubkeys
+      .map((pubkey) => [pubkey, profiles[pubkey]] as const)
+      .filter((entry): entry is readonly [Pubkey, ProfileSummary] => Boolean(entry[1])),
+  );
+}
+
 function isEventId(id: unknown): id is string {
   return typeof id === "string" && eventIdPattern.test(id);
 }
@@ -900,7 +945,19 @@ export function createFeedSnapshotService({
   }
 
   async function fetch(): Promise<FeedBootstrapSnapshot> {
-    const feedBatch = await fetchGlobalFeedEvents();
+    const previousSnapshot = snapshot;
+    const cachedBatch = snapshotBatchForRefresh(
+      previousSnapshot,
+      sinceFromAgeHours(ageHours),
+    );
+    const freshBatch = await fetchGlobalFeedEvents();
+    const feedBatch = {
+      events: mergeEvents(cachedBatch.events, freshBatch.events),
+      relayHintsByEventId: mergeRelayHints(
+        cachedBatch.relayHintsByEventId,
+        freshBatch.relayHintsByEventId,
+      ),
+    };
     const manifest = await moderation.getManifest();
     const visibleFeedEvents =
       manifest.updatedAt === 0
@@ -933,7 +990,11 @@ export function createFeedSnapshotService({
         ...visibleReferencedEvents.map((event) => event.pubkey),
       ]),
     ];
-    const profiles = await fetchProfileMetadata(pubkeys);
+    const freshProfiles = await fetchProfileMetadata(pubkeys);
+    const profiles = {
+      ...pickProfilesForPubkeys(previousSnapshot?.profiles, pubkeys),
+      ...freshProfiles,
+    };
 
     return {
       fetchedAt: Date.now(),
