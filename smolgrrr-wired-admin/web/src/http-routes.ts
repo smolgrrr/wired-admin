@@ -131,7 +131,10 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
   });
 
   app.get("/api/feed/bootstrap", async (_req: Request, res: Response) => {
-    res.setHeader("Cache-Control", "public, max-age=120, stale-while-revalidate=300");
+    res.setHeader(
+      "Cache-Control",
+      "public, max-age=60, s-maxage=120, stale-while-revalidate=600",
+    );
     const currentSnapshot = feedSnapshot.current();
     if (currentSnapshot) {
       res.json(currentSnapshot);
@@ -323,8 +326,10 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
   app.use(
     express.static(publicDir, {
       extensions: ["html"],
-      setHeaders(res) {
-        res.setHeader("Cache-Control", "no-store");
+      setHeaders(res, path) {
+        if (path.endsWith(".html")) {
+          res.setHeader("Cache-Control", "no-store");
+        }
       },
     }),
   );
