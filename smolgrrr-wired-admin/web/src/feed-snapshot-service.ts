@@ -47,6 +47,9 @@ type FeedSnapshotServiceOptions = {
 };
 
 const replyParentBatchSize = 50;
+// Bootstrap is only first-paint data; live relay subscriptions fill older roots and deeper replies.
+const initialFeedRootLimit = 30;
+const initialFeedRepliesPerRootLimit = 12;
 
 type FetchReplyClosureOptions = {
   relays: ConnectedRelay[];
@@ -161,6 +164,20 @@ function pickProfilesForPubkeys(
       .map((pubkey) => [pubkey, profiles[pubkey]] as const)
       .filter((entry): entry is readonly [Pubkey, ProfileSummary] => Boolean(entry[1])),
   );
+}
+
+function filterRelayHintsByEventIds(
+  relayHintsByEventId: RelayHintsByEventId,
+  eventIds: Set<string>,
+): RelayHintsByEventId {
+  const filtered: RelayHintsByEventId = new Map();
+
+  eventIds.forEach((eventId) => {
+    const relayHints = relayHintsForEvent(eventId, relayHintsByEventId);
+    if (relayHints) filtered.set(normalizeEventId(eventId), relayHints);
+  });
+
+  return filtered;
 }
 
 function isEventId(id: unknown): id is string {
@@ -842,7 +859,9 @@ export function createFeedSnapshotService({
     return processedEvents.map((processed) => {
       const serialized: FeedBootstrapProcessedEvent = {
         postEventId: normalizeEventId(processed.postEvent.id),
-        replyIds: processed.replies.map((reply) => normalizeEventId(reply.id)),
+        replyIds: processed.replies
+          .slice(0, initialFeedRepliesPerRootLimit)
+          .map((reply) => normalizeEventId(reply.id)),
         threadReplyCount: processed.threadReplyCount,
         rootWork: processed.rootWork,
         replyWork: processed.replyWork,
@@ -854,6 +873,19 @@ export function createFeedSnapshotService({
       }
       return serialized;
     });
+  }
+
+  function bootstrapEventsFromProcessedEvents(
+    processedEvents: ProcessedFeedEvent[],
+    referencedEvents: NostrEvent[],
+  ): NostrEvent[] {
+    return mergeEvents(
+      processedEvents.flatMap((processed) => [
+        processed.postEvent,
+        ...processed.replies.slice(0, initialFeedRepliesPerRootLimit),
+      ]),
+      referencedEvents,
+    );
   }
 
   async function fetchReferencedEvents(refs: ReferencedEventRef[], knownEventIds: Set<string>): Promise<RelayBatch> {
@@ -967,29 +999,26 @@ export function createFeedSnapshotService({
       visibleFeedEvents,
       feedBatch.relayHintsByEventId,
     );
+    const bootstrapProcessedEvents = processedEvents.slice(0, initialFeedRootLimit);
     const knownEventIds = new Set(visibleFeedEvents.map((event) => event.id));
     const referencedBatch = await fetchReferencedEvents(
-      snapshotReferenceRefs(processedEvents),
+      snapshotReferenceRefs(bootstrapProcessedEvents),
       knownEventIds,
     );
     const visibleReferencedEvents =
       manifest.updatedAt === 0
         ? referencedBatch.events
         : referencedBatch.events.filter((event) => !moderation.isEventModerated(event, manifest));
-    const events = mergeEvents(visibleFeedEvents, visibleReferencedEvents);
+    const events = bootstrapEventsFromProcessedEvents(
+      bootstrapProcessedEvents,
+      visibleReferencedEvents,
+    );
     const relayHintsByEventId = mergeRelayHints(
       feedBatch.relayHintsByEventId,
       referencedBatch.relayHintsByEventId,
     );
-    const pubkeys = [
-      ...new Set([
-        ...processedEvents.flatMap((processed) => [
-          processed.postEvent.pubkey,
-          ...processed.replies.map((reply) => reply.pubkey),
-        ]),
-        ...visibleReferencedEvents.map((event) => event.pubkey),
-      ]),
-    ];
+    const eventIds = new Set(events.map((event) => normalizeEventId(event.id)));
+    const pubkeys = [...new Set(events.map((event) => event.pubkey))];
     const freshProfiles = await fetchProfileMetadata(pubkeys);
     const profiles = {
       ...pickProfilesForPubkeys(previousSnapshot?.profiles, pubkeys),
@@ -998,9 +1027,11 @@ export function createFeedSnapshotService({
 
     return {
       fetchedAt: Date.now(),
-      processedEvents: serializeProcessedEvents(processedEvents),
+      processedEvents: serializeProcessedEvents(bootstrapProcessedEvents),
       eventsById: buildEventsById(events),
-      relayHintsByEventId: serializeRelayHints(relayHintsByEventId),
+      relayHintsByEventId: serializeRelayHints(
+        filterRelayHintsByEventIds(relayHintsByEventId, eventIds),
+      ),
       profiles,
       scoring: {
         ageHours,
