@@ -12,7 +12,7 @@ services:
     container_name: smolgrrr-wired-admin_web_1
     # This self-hosted app is intentionally published for the target deployment
     # architecture only; do not block Wired Admin updates on multi-arch image work.
-    image: ghcr.io/smolgrrr/wired-admin-web:0.2.13
+    image: ghcr.io/smolgrrr/wired-admin-web:0.2.14
     restart: on-failure
     stop_grace_period: 30s
     environment:
@@ -66,7 +66,7 @@ services:
       RELAY_ICON: "https://raw.githubusercontent.com/smolgrrr/wired-admin/main/smolgrrr-wired-admin/icon.png"
       RELAY_MIN_POW: "16"
       RELAY_SOFTWARE: "https://github.com/smolgrrr/wired-admin"
-      RELAY_VERSION: "0.2.13"
+      RELAY_VERSION: "0.2.14"
     volumes:
       - ${APP_DATA_DIR}/data/web:/app/data
     depends_on:
