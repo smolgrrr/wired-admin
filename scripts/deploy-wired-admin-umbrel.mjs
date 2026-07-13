@@ -211,13 +211,20 @@ function readScalarInBlock(lines, block, key) {
   fail(`Could not find ${key} in docker-compose.yml.`);
 }
 
-function updateScalarInBlock(lines, block, key, value, {quote = true} = {}) {
+function updateScalarInBlock(lines, block, key, value, {quote = true, insert = false} = {}) {
   const pattern = yamlKeyPattern(key);
   for (let i = block.start + 1; i < block.end; i += 1) {
     const match = lines[i].match(pattern);
     if (!match) continue;
     const rendered = quote ? quoteYamlString(value) : String(value);
     lines[i] = `${match[1]}${key}: ${rendered}`;
+    return true;
+  }
+  if (insert) {
+    const rendered = quote ? quoteYamlString(value) : String(value);
+    const indent = " ".repeat(lineIndent(lines[block.start]) + 2);
+    lines.splice(block.end, 0, `${indent}${key}: ${rendered}`);
+    block.end += 1;
     return true;
   }
   fail(`Could not update ${key} in docker-compose.yml.`);
@@ -278,7 +285,7 @@ function updateInstalledCompose(composeText, target) {
   updateScalarInBlock(lines, web, "image", target.image, {quote: false});
   updateScalarInBlock(lines, envBlock, "RELAY_VERSION", target.relayVersion, {quote: true});
   for (const [key, value] of Object.entries(target.environment)) {
-    updateScalarInBlock(lines, envBlock, key, value, {quote: true});
+    updateScalarInBlock(lines, envBlock, key, value, {quote: true, insert: true});
   }
 
   return `${lines.join(newline)}${trailingNewline ? newline : ""}`;
