@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import path from "node:path";
 import {
   finalizeEvent,
   getPublicKey,
@@ -16,6 +17,7 @@ import {
 import type { RevenueWallet } from "./wallet.js";
 import {
   HttpLightningAddressResolver,
+  parseLightningAddress,
   type LightningAddressMetadata,
   type LightningAddressResolver,
 } from "./lightning-address.js";
@@ -34,6 +36,7 @@ type RevenueServiceOptions = {
   invoicesEnabled?: boolean;
   payoutsEnabled?: boolean;
   maxRoutingFeeMsat?: number;
+  encryptionKeyVersion?: number;
 };
 
 type PostingPath = RevenueEnrollment["postingPath"];
@@ -49,15 +52,6 @@ export type SettledZapResult = {
   wiredMsat: number;
   receipt: Event;
 };
-
-function normalizeAddress(address: string): string {
-  const normalized = String(address || "").trim().toLowerCase();
-  const match = /^([^\s@]{1,64})@([a-z0-9.-]{1,253})$/i.exec(normalized);
-  if (!match || !match[1] || !match[2] || match[2].startsWith(".") || match[2].endsWith(".")) {
-    throw new Error("invalid Lightning address");
-  }
-  return `${match[1]}@${match[2]}`;
-}
 
 function parseEvent(raw: string): Event {
   let value: unknown;
@@ -99,10 +93,11 @@ export class RevenueService {
   readonly #invoicesEnabled: boolean;
   readonly #payoutsEnabled: boolean;
   readonly #maxRoutingFeeMsat: number;
+  #invoiceCreationQueue: Promise<unknown> = Promise.resolve();
 
   constructor(options: RevenueServiceOptions) {
     this.#ledger = new RevenueLedger(options.databaseFile);
-    this.#vault = new AddressVault(options.encryptionKey);
+    this.#vault = new AddressVault(options.encryptionKey, options.encryptionKeyVersion);
     this.#recipientSecretKey = options.recipientSecretKey;
     this.#recipientPubkey = getPublicKey(options.recipientSecretKey);
     this.#relayUrl = options.relayUrl;
@@ -135,7 +130,14 @@ export class RevenueService {
   operatorStatus(): ReturnType<RevenueLedger["status"]> & {
     walletBackend: string;
     controls: { enrollmentEnabled: boolean; invoicesEnabled: boolean; payoutsEnabled: boolean };
+    encryptionKeyVersion: number;
+    alerts: string[];
   } {
+    const status = this.#ledger.status();
+    const alerts: string[] = [];
+    if ((status.payouts.ambiguous || 0) > 0) alerts.push("ambiguous payouts require provider reconciliation");
+    if (status.creatorReservedMsat > 0) alerts.push("creator funds are reserved in active payouts");
+    if (status.wiredRevenueMsat < 0) alerts.push("Wired fee balance is negative");
     return {
       walletBackend: this.#wallet.backend,
       controls: {
@@ -143,7 +145,9 @@ export class RevenueService {
         invoicesEnabled: this.#invoicesEnabled,
         payoutsEnabled: this.#payoutsEnabled,
       },
-      ...this.#ledger.status(),
+      encryptionKeyVersion: this.#vault.keyVersion,
+      alerts,
+      ...status,
     };
   }
 
@@ -163,7 +167,7 @@ export class RevenueService {
     ) {
       throw new Error("event must contain exactly one Wired revenue zap tag");
     }
-    const address = normalizeAddress(input.address);
+    const address = parseLightningAddress(input.address).address;
     const encrypted = this.#vault.encrypt(address);
     return this.#ledger.createEnrollment({
       enrollmentId: crypto.randomUUID(),
@@ -174,12 +178,13 @@ export class RevenueService {
       addressCiphertext: encrypted.ciphertext,
       addressIv: encrypted.iv,
       addressTag: encrypted.tag,
+      addressKeyVersion: encrypted.keyVersion,
       state: "pending",
     });
   }
 
   async validateAddress(address: string): Promise<LightningAddressMetadata> {
-    return this.#addressResolver.validate(normalizeAddress(address));
+    return this.#addressResolver.validate(parseLightningAddress(address).address);
   }
 
   activateEnrollment(enrollmentId: string): RevenueEnrollment {
@@ -203,40 +208,57 @@ export class RevenueService {
     if (!enrollment || enrollment.state !== "active") throw new Error("event is not active for Wired revenue");
     const request = parseEvent(input.rawZapRequest);
     if (!verifyEvent(request) || request.kind !== 9734) throw new Error("invalid signed NIP-57 zap request");
-    if (request.content !== "") throw new Error("zap request content must be empty");
     if (oneTag(request, "p")[1] !== this.#recipientPubkey) throw new Error("zap recipient does not match Wired");
     if (oneTag(request, "e")[1] !== input.eventId) throw new Error("zap target does not match enrollment");
     if (Number(oneTag(request, "amount")[1]) !== input.amountMsat) {
       throw new Error("zap amount tag does not match callback amount");
     }
-
-    const existing = this.#ledger.invoiceForZapRequest(request.id);
-    if (existing) {
-      if (existing.eventId !== input.eventId || existing.amountMsat !== input.amountMsat) {
-        throw new Error("zap request already created a conflicting invoice");
-      }
-      return { paymentHash: existing.paymentHash, invoice: existing.invoice };
+    const relayTag = oneTag(request, "relays");
+    if (
+      relayTag.length < 2 ||
+      relayTag.slice(1).some((relay) => {
+        try {
+          const parsed = new URL(relay);
+          return parsed.protocol !== "wss:" && parsed.protocol !== "ws:";
+        } catch {
+          return true;
+        }
+      })
+    ) {
+      throw new Error("zap request relays tag is invalid");
     }
 
-    const descriptionHash = crypto.createHash("sha256").update(input.rawZapRequest, "utf8").digest("hex");
-    const walletInvoice = await this.#wallet.createInvoice({
-      amountMsat: input.amountMsat,
-      descriptionHash,
+    const run = this.#invoiceCreationQueue.then(async () => {
+      const existing = this.#ledger.invoiceForZapRequest(request.id);
+      if (existing) {
+        if (existing.eventId !== input.eventId || existing.amountMsat !== input.amountMsat) {
+          throw new Error("zap request already created a conflicting invoice");
+        }
+        return { paymentHash: existing.paymentHash, invoice: existing.invoice };
+      }
+
+      const descriptionHash = crypto.createHash("sha256").update(input.rawZapRequest, "utf8").digest("hex");
+      const walletInvoice = await this.#wallet.createInvoice({
+        amountMsat: input.amountMsat,
+        descriptionHash,
+      });
+      const invoice: RevenueInvoice = {
+        paymentHash: walletInvoice.paymentHash,
+        zapRequestId: request.id,
+        eventId: input.eventId,
+        rawZapRequest: input.rawZapRequest,
+        amountMsat: input.amountMsat,
+        invoice: walletInvoice.invoice,
+        descriptionHash,
+        state: "pending",
+        receipt: null,
+        receiptPublished: false,
+      };
+      const stored = this.#ledger.createInvoice(invoice);
+      return { paymentHash: stored.paymentHash, invoice: stored.invoice };
     });
-    const invoice: RevenueInvoice = {
-      paymentHash: walletInvoice.paymentHash,
-      zapRequestId: request.id,
-      eventId: input.eventId,
-      rawZapRequest: input.rawZapRequest,
-      amountMsat: input.amountMsat,
-      invoice: walletInvoice.invoice,
-      descriptionHash,
-      state: "pending",
-      receipt: null,
-      receiptPublished: false,
-    };
-    const stored = this.#ledger.createInvoice(invoice);
-    return { paymentHash: stored.paymentHash, invoice: stored.invoice };
+    this.#invoiceCreationQueue = run.catch(() => {});
+    return run;
   }
 
   async reconcileInvoice(paymentHash: string): Promise<SettledZapResult> {
@@ -289,6 +311,7 @@ export class RevenueService {
 
   async reconcileAll(now = Date.now()): Promise<{
     settledInvoices: number;
+    publishedReceipts: number;
     completedPayouts: number;
     releasedPayouts: number;
     deferredPayouts: number;
@@ -296,11 +319,23 @@ export class RevenueService {
   }> {
     const result = {
       settledInvoices: 0,
+      publishedReceipts: 0,
       completedPayouts: 0,
       releasedPayouts: 0,
       deferredPayouts: 0,
       errors: 0,
     };
+    for (const invoice of this.#ledger.unpublishedReceipts()) {
+      try {
+        if (!invoice.receipt) continue;
+        const acceptedRelays = await this.#publishReceipt(invoice.receipt);
+        if (acceptedRelays.length === 0) throw new Error("no relay accepted the zap receipt");
+        this.#ledger.markReceiptPublished(invoice.paymentHash);
+        result.publishedReceipts += 1;
+      } catch {
+        result.errors += 1;
+      }
+    }
     for (const invoice of this.#ledger.pendingInvoices()) {
       try {
         const walletInvoice = await this.#wallet.lookupInvoice(invoice.paymentHash);
@@ -363,6 +398,12 @@ export class RevenueService {
     return payout;
   }
 
+  backupTo(directory: string): { filename: string } {
+    const filename = path.join(directory, `revenue-${new Date().toISOString().replaceAll(":", "-")}.sqlite`);
+    this.#ledger.backupTo(filename);
+    return { filename: path.basename(filename) };
+  }
+
   close(): void {
     this.#ledger.close();
   }
@@ -380,6 +421,7 @@ export class RevenueService {
       });
     }
     const address = this.#vault.decrypt({
+      keyVersion: enrollment.addressKeyVersion,
       ciphertext: enrollment.addressCiphertext,
       iv: enrollment.addressIv,
       tag: enrollment.addressTag,
@@ -409,6 +451,26 @@ export class RevenueService {
       return this.#ledger.deferPayout({
         payoutKey: enrollment.payoutKey,
         reason: error instanceof Error ? error.message : "payout invoice request failed",
+        nextAttemptAt: Date.now() + 5 * 60_000,
+      });
+    }
+    let estimatedFeeMsat: number;
+    try {
+      estimatedFeeMsat = await this.#wallet.estimateFeeMsat(invoice);
+    } catch (error) {
+      return this.#ledger.deferPayout({
+        payoutKey: enrollment.payoutKey,
+        reason: error instanceof Error ? error.message : "routing-fee quote failed",
+        nextAttemptAt: Date.now() + 5 * 60_000,
+      });
+    }
+    if (
+      estimatedFeeMsat > this.#maxRoutingFeeMsat ||
+      estimatedFeeMsat > this.#ledger.wiredRevenueMsat()
+    ) {
+      return this.#ledger.deferPayout({
+        payoutKey: enrollment.payoutKey,
+        reason: `estimated routing fee ${estimatedFeeMsat} msat exceeds the safety bound`,
         nextAttemptAt: Date.now() + 5 * 60_000,
       });
     }

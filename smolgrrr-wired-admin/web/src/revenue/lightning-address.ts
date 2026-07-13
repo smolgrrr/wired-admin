@@ -10,10 +10,16 @@ export interface LightningAddressResolver {
   requestInvoice(address: string, amountMsat: number): Promise<string>;
 }
 
-function parseAddress(address: string): { address: string; username: string; domain: string } {
+export function parseLightningAddress(address: string): {
+  address: string;
+  username: string;
+  domain: string;
+} {
   const normalized = String(address || "").trim().toLowerCase();
   const match = /^([^\s@]{1,64})@([a-z0-9.-]{1,253})$/i.exec(normalized);
-  if (!match?.[1] || !match[2]) throw new Error("invalid Lightning address");
+  if (!match?.[1] || !match[2] || match[2].startsWith(".") || match[2].endsWith(".")) {
+    throw new Error("invalid Lightning address");
+  }
   return { address: normalized, username: match[1], domain: match[2] };
 }
 
@@ -33,7 +39,7 @@ export class HttpLightningAddressResolver implements LightningAddressResolver {
   }
 
   async validate(address: string): Promise<LightningAddressMetadata> {
-    const parsed = parseAddress(address);
+    const parsed = parseLightningAddress(address);
     const response = await this.#fetch(
       `https://${parsed.domain}/.well-known/lnurlp/${encodeURIComponent(parsed.username)}`,
       { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8_000) },
@@ -85,7 +91,7 @@ export class StagingLightningAddressResolver implements LightningAddressResolver
   }
 
   async validate(address: string): Promise<LightningAddressMetadata> {
-    const parsed = parseAddress(address);
+    const parsed = parseLightningAddress(address);
     if (!parsed.domain.endsWith(".invalid")) return this.#http.validate(parsed.address);
     return {
       address: parsed.address,

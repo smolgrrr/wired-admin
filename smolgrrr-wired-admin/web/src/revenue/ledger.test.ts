@@ -40,6 +40,19 @@ test("a settled zap is conserved with Wired-favouring 70/30 rounding exactly onc
     });
     assert.equal(ledger.wiredRevenueMsat(), 3_001);
     assert.equal(ledger.totalLedgerMsat(), 10_001);
+    const backupFile = path.join(directory, "backups", "revenue.sqlite");
+    ledger.backupTo(backupFile);
+    const restored = new RevenueLedger(backupFile);
+    try {
+      assert.deepEqual(restored.balanceFor("creator-address-snapshot"), {
+        availableMsat: 7_000,
+        reservedMsat: 0,
+        paidMsat: 0,
+      });
+      assert.equal(restored.totalLedgerMsat(), 10_001);
+    } finally {
+      restored.close();
+    }
   } finally {
     ledger.close();
     await rm(directory, { recursive: true, force: true });

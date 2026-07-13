@@ -54,6 +54,10 @@ export class FakeWallet implements RevenueWallet {
     invoice.settledAt = this.#settlementSequence;
   }
 
+  async estimateFeeMsat(_invoice: string): Promise<number> {
+    return 0;
+  }
+
   async payInvoice(input: {
     invoice: string;
     idempotencyKey: string;
@@ -90,12 +94,14 @@ export function createWalletFromConfig(input: {
   lnbitsEndpoint?: string;
   lnbitsInvoiceKey?: string;
   lnbitsAdminKey?: string;
+  lnbitsWebhookUrl?: string;
 }): RevenueWallet {
   if (input.backend === "lnbits") {
     return new LnbitsWallet({
       endpoint: input.lnbitsEndpoint || "",
       invoiceKey: input.lnbitsInvoiceKey || "",
       adminKey: input.lnbitsAdminKey || "",
+      ...(input.lnbitsWebhookUrl ? { webhookUrl: input.lnbitsWebhookUrl } : {}),
     });
   }
   if (input.backend === "fake") {

@@ -4,6 +4,7 @@ type LnbitsWalletOptions = {
   endpoint: string;
   invoiceKey: string;
   adminKey: string;
+  webhookUrl?: string;
   fetchImplementation?: typeof fetch;
 };
 
@@ -24,6 +25,7 @@ export class LnbitsWallet implements RevenueWallet {
   readonly #invoiceKey: string;
   readonly #adminKey: string;
   readonly #fetch: typeof fetch;
+  readonly #webhookUrl: string | undefined;
   readonly #invoiceAmounts = new Map<string, number>();
   readonly #paymentAmounts = new Map<string, number>();
 
@@ -32,6 +34,7 @@ export class LnbitsWallet implements RevenueWallet {
     this.#invoiceKey = options.invoiceKey.trim();
     this.#adminKey = options.adminKey.trim();
     this.#fetch = options.fetchImplementation ?? fetch;
+    this.#webhookUrl = options.webhookUrl;
     if (!this.#endpoint.startsWith("https://")) throw new Error("LNbits endpoint must use HTTPS");
     if (!this.#invoiceKey || !this.#adminKey) throw new Error("LNbits invoice and admin keys are required");
   }
@@ -47,6 +50,7 @@ export class LnbitsWallet implements RevenueWallet {
         amount: input.amountMsat / 1_000,
         memo: "",
         description_hash: input.descriptionHash,
+        ...(this.#webhookUrl ? { webhook: this.#webhookUrl } : {}),
       },
     });
     if (!value.payment_hash || !value.payment_request) throw new Error("LNbits did not return an invoice");
@@ -96,8 +100,34 @@ export class LnbitsWallet implements RevenueWallet {
     };
   }
 
+  async estimateFeeMsat(invoice: string): Promise<number> {
+    const response = await this.#fetch(
+      `${this.#endpoint}/api/v1/payments/fee-reserve?invoice=${encodeURIComponent(invoice)}`,
+      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8_000) },
+    );
+    const value = await response.json().catch(() => null) as { fee_reserve?: number } | null;
+    const feeMsat = Number(value?.fee_reserve);
+    if (!response.ok || !Number.isSafeInteger(feeMsat) || feeMsat < 0) {
+      throw new Error("LNbits fee reserve quote is unavailable");
+    }
+    return feeMsat;
+  }
+
   async lookupPayment(paymentId: string): Promise<WalletPayment> {
-    const value = await this.#request(`/api/v1/payments/${encodeURIComponent(paymentId)}`, this.#adminKey);
+    let value: LnbitsPayment;
+    const byExternalId = await this.#fetch(
+      `${this.#endpoint}/api/v1/payments?external_id=${encodeURIComponent(paymentId)}`,
+      {
+        headers: { Accept: "application/json", "X-Api-Key": this.#adminKey },
+        signal: AbortSignal.timeout(15_000),
+      },
+    );
+    const matches = await byExternalId.json().catch(() => null) as LnbitsPayment[] | null;
+    if (byExternalId.ok && Array.isArray(matches) && matches[0]) {
+      value = matches[0];
+    } else {
+      value = await this.#request(`/api/v1/payments/${encodeURIComponent(paymentId)}`, this.#adminKey);
+    }
     const amountMsat = this.#paymentAmounts.get(paymentId) ?? Math.abs(Number(value.amount || 0));
     if (!Number.isSafeInteger(amountMsat) || amountMsat <= 0) throw new Error("LNbits payment amount is missing");
     return {

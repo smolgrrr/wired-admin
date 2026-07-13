@@ -1376,11 +1376,13 @@ if (revenueEnabled) {
     lnbitsEndpoint: process.env.REVENUE_LNBITS_ENDPOINT || "",
     lnbitsInvoiceKey: process.env.REVENUE_LNBITS_INVOICE_KEY || "",
     lnbitsAdminKey: process.env.REVENUE_LNBITS_ADMIN_KEY || "",
+    lnbitsWebhookUrl: `${revenuePublicBaseUrl}/api/revenue/wallet/webhook`,
   });
   if (wallet instanceof FakeWallet) revenueFakeWallet = wallet;
   revenueService = new RevenueService({
     databaseFile: revenueDatabaseFile,
     encryptionKey: hexToBytes(encryptionKey),
+    encryptionKeyVersion: Math.max(1, Number(process.env.REVENUE_ENCRYPTION_KEY_VERSION || 1)),
     recipientSecretKey: secretKey,
     relayUrl: revenueRelayUrl,
     callbackUrl: `${revenuePublicBaseUrl}/api/revenue/zap`,
@@ -1429,6 +1431,7 @@ if (revenueService) {
     lnurlUsername: revenueLnurlUsername,
     minSendableMsat: Math.max(1_000, Number(process.env.REVENUE_MIN_SENDABLE_MSAT || 1_000)),
     maxSendableMsat: Math.max(1_000, Number(process.env.REVENUE_MAX_SENDABLE_MSAT || 100_000_000_000)),
+    backupDirectory: process.env.REVENUE_BACKUP_DIR || path.join(dataDir, "revenue-backups"),
   });
 }
 

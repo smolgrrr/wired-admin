@@ -49,7 +49,7 @@ test("an enrolled event receives one settled NIP-57 zap and one public receipt",
     const zapperSecret = generateSecretKey();
     const zapRequest = finalizeEvent({
       kind: 9734,
-      content: "",
+      content: "great post",
       created_at: 2,
       tags: [
         ["p", recipientPubkey],
@@ -59,11 +59,19 @@ test("an enrolled event receives one settled NIP-57 zap and one public receipt",
       ],
     } satisfies EventTemplate, zapperSecret);
     const rawZapRequest = JSON.stringify(zapRequest);
-    const invoice = await service.createZapInvoice({
-      eventId: event.id,
-      amountMsat: 10_001,
-      rawZapRequest,
-    });
+    const [invoice, concurrentDuplicate] = await Promise.all([
+      service.createZapInvoice({
+        eventId: event.id,
+        amountMsat: 10_001,
+        rawZapRequest,
+      }),
+      service.createZapInvoice({
+        eventId: event.id,
+        amountMsat: 10_001,
+        rawZapRequest,
+      }),
+    ]);
+    assert.deepEqual(concurrentDuplicate, invoice);
 
     await wallet.settleInvoice(invoice.paymentHash);
     const first = await service.reconcileInvoice(invoice.paymentHash);
@@ -189,6 +197,10 @@ test("an ambiguous outgoing payment stays reserved until provider reconciliation
 
     lookupInvoice(paymentHash: string) {
       return this.incoming.lookupInvoice(paymentHash);
+    }
+
+    async estimateFeeMsat() {
+      return 4;
     }
 
     async payInvoice(input: {

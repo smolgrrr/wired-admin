@@ -23,6 +23,7 @@ test("LNbits adapter creates description-hash invoices and pays with separated k
     endpoint: "https://lnbits.example",
     invoiceKey: "invoice-key",
     adminKey: "admin-key",
+    webhookUrl: "https://wired.example/api/revenue/wallet/webhook",
     fetchImplementation: fakeFetch,
   });
 
@@ -33,6 +34,7 @@ test("LNbits adapter creates description-hash invoices and pays with separated k
     amount: 21,
     memo: "",
     description_hash: "ab".repeat(32),
+    webhook: "https://wired.example/api/revenue/wallet/webhook",
   });
   assert.equal((requests[0]?.init?.headers as Record<string, string>)["X-Api-Key"], "invoice-key");
   assert.equal((await wallet.lookupInvoice("hash-in")).status, "settled");
@@ -51,4 +53,8 @@ test("LNbits adapter creates description-hash invoices and pays with separated k
     external_id: "payout-1",
   });
   assert.equal((requests[2]?.init?.headers as Record<string, string>)["X-Api-Key"], "admin-key");
+
+  const lookedUp = await wallet.lookupPayment("payout-1");
+  assert.equal(lookedUp.status, "succeeded");
+  assert.match(requests[3]?.url || "", /external_id=payout-1$/);
 });

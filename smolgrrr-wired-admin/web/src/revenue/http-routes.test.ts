@@ -115,6 +115,13 @@ test("public HTTP contract completes the FakeWallet NIP-57 revenue transaction",
     assert.equal(settlement.wiredMsat, 3_000);
     assert.equal(receipts.length, 1);
 
+    const webhook = await fetch(`${baseUrl}/api/revenue/wallet/webhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ payment_hash: paymentHash }),
+    }).then(responseJson<{ ok: boolean }>);
+    assert.equal(webhook.ok, true);
+
     const status = await fetch(`${baseUrl}/api/revenue/operator/status`).then(responseJson<{
       creatorAvailableMsat: number;
       wiredRevenueMsat: number;

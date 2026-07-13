@@ -10,6 +10,7 @@ type RevenueRoutesOptions = {
   lnurlUsername: string;
   minSendableMsat: number;
   maxSendableMsat: number;
+  backupDirectory?: string;
 };
 
 function eventIdFromZapRequest(raw: string): string {
@@ -118,6 +119,20 @@ export function registerRevenueRoutes(app: Application, options: RevenueRoutesOp
     }
   });
 
+  app.post("/api/revenue/wallet/webhook", async (req: Request, res: Response) => {
+    const paymentHash = String(req.body?.payment_hash || req.body?.paymentHash || "");
+    if (!paymentHash) {
+      res.status(400).json({ error: "payment hash is required" });
+      return;
+    }
+    try {
+      await service.reconcileInvoice(paymentHash);
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(202).json({ ok: false, reason: errorMessage(error) });
+    }
+  });
+
   app.post("/api/revenue/fake/settle", async (req: Request, res: Response) => {
     if (!options.isAdminAuthorized(req)) {
       res.status(401).json({ error: "unauthorized" });
@@ -158,5 +173,21 @@ export function registerRevenueRoutes(app: Application, options: RevenueRoutesOp
       return;
     }
     res.json({ ok: true, ...(await service.reconcileAll()) });
+  });
+
+  app.post("/api/revenue/operator/backup", (req: Request, res: Response) => {
+    if (!options.isAdminAuthorized(req)) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    if (!options.backupDirectory) {
+      res.status(503).json({ error: "revenue backup directory is not configured" });
+      return;
+    }
+    try {
+      res.status(201).json({ ok: true, ...service.backupTo(options.backupDirectory) });
+    } catch (error) {
+      res.status(500).json({ error: errorMessage(error) });
+    }
   });
 }

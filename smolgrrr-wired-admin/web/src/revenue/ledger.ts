@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Event } from "nostr-tools";
@@ -39,6 +39,7 @@ export type RevenueEnrollment = {
   addressCiphertext: string;
   addressIv: string;
   addressTag: string;
+  addressKeyVersion: number;
   state: "pending" | "active" | "failed";
 };
 
@@ -64,6 +65,7 @@ type EnrollmentRow = {
   address_ciphertext: string;
   address_iv: string;
   address_tag: string;
+  address_key_version: number;
   state: "pending" | "active" | "failed";
 };
 
@@ -154,6 +156,7 @@ export class RevenueLedger {
         address_ciphertext TEXT NOT NULL,
         address_iv TEXT NOT NULL,
         address_tag TEXT NOT NULL,
+        address_key_version INTEGER NOT NULL CHECK (address_key_version > 0),
         state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'failed')),
         created_at INTEGER NOT NULL,
         activated_at INTEGER
@@ -210,8 +213,8 @@ export class RevenueLedger {
       .prepare(`
         INSERT INTO revenue_enrollments (
           enrollment_id, event_id, event_json, posting_path, payout_key,
-          address_ciphertext, address_iv, address_tag, state, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          address_ciphertext, address_iv, address_tag, address_key_version, state, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         enrollment.enrollmentId,
@@ -222,6 +225,7 @@ export class RevenueLedger {
         enrollment.addressCiphertext,
         enrollment.addressIv,
         enrollment.addressTag,
+        enrollment.addressKeyVersion,
         enrollment.state,
         Date.now(),
       );
@@ -303,6 +307,16 @@ export class RevenueLedger {
   pendingInvoices(): RevenueInvoice[] {
     return (this.#database
       .prepare("SELECT * FROM revenue_invoices WHERE state = 'pending' ORDER BY created_at")
+      .all() as InvoiceRow[]).map((row) => this.#mapInvoice(row));
+  }
+
+  unpublishedReceipts(): RevenueInvoice[] {
+    return (this.#database
+      .prepare(`
+        SELECT * FROM revenue_invoices
+        WHERE state = 'settled' AND receipt_json IS NOT NULL AND receipt_published_at IS NULL
+        ORDER BY settled_at
+      `)
       .all() as InvoiceRow[]).map((row) => this.#mapInvoice(row));
   }
 
@@ -655,6 +669,14 @@ export class RevenueLedger {
     return Number(row.amount_msat);
   }
 
+  backupTo(filename: string): void {
+    if (existsSync(filename)) throw new Error("revenue backup destination already exists");
+    mkdirSync(path.dirname(filename), { recursive: true });
+    const escaped = filename.replaceAll("'", "''");
+    this.#database.exec("PRAGMA wal_checkpoint(FULL)");
+    this.#database.exec(`VACUUM INTO '${escaped}'`);
+  }
+
   close(): void {
     this.#database.close();
   }
@@ -669,6 +691,7 @@ export class RevenueLedger {
       addressCiphertext: row.address_ciphertext,
       addressIv: row.address_iv,
       addressTag: row.address_tag,
+      addressKeyVersion: Number(row.address_key_version),
       state: row.state,
     };
   }

@@ -18,6 +18,7 @@ export interface RevenueWallet {
   readonly backend: string;
   createInvoice(input: { amountMsat: number; descriptionHash: string }): Promise<WalletInvoice>;
   lookupInvoice(paymentHash: string): Promise<Omit<WalletInvoice, "invoice">>;
+  estimateFeeMsat(invoice: string): Promise<number>;
   payInvoice(input: {
     invoice: string;
     idempotencyKey: string;
