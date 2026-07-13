@@ -8,6 +8,7 @@ test("LNbits adapter creates description-hash invoices and pays with separated k
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
     requests.push({ url, ...(init ? { init } : {}), body });
+    if (url.includes("external_id=")) return Response.json([]);
     if (init?.method === "POST" && body?.out === false) {
       return Response.json({ payment_hash: "hash-in", payment_request: "lnbc21incoming" });
     }
@@ -27,16 +28,22 @@ test("LNbits adapter creates description-hash invoices and pays with separated k
     fetchImplementation: fakeFetch,
   });
 
-  const invoice = await wallet.createInvoice({ amountMsat: 21_000, descriptionHash: "ab".repeat(32) });
+  const invoice = await wallet.createInvoice({
+    amountMsat: 21_000,
+    descriptionHash: "ab".repeat(32),
+    idempotencyKey: "zap-1",
+  });
   assert.equal(invoice.invoice, "lnbc21incoming");
-  assert.deepEqual(requests[0]?.body, {
+  const createRequest = requests.find((request) => request.body?.out === false);
+  assert.deepEqual(createRequest?.body, {
     out: false,
     amount: 21,
     memo: "",
     description_hash: "ab".repeat(32),
+    external_id: "zap-1",
     webhook: "https://wired.example/api/revenue/wallet/webhook",
   });
-  assert.equal((requests[0]?.init?.headers as Record<string, string>)["X-Api-Key"], "invoice-key");
+  assert.equal((createRequest?.init?.headers as Record<string, string>)["X-Api-Key"], "invoice-key");
   assert.equal((await wallet.lookupInvoice("hash-in")).status, "settled");
 
   const payment = await wallet.payInvoice({
@@ -46,15 +53,16 @@ test("LNbits adapter creates description-hash invoices and pays with separated k
   });
   assert.equal(payment.status, "succeeded");
   assert.equal(payment.feeMsat, 12);
-  assert.deepEqual(requests[2]?.body, {
+  const payRequest = requests.find((request) => request.body?.out === true);
+  assert.deepEqual(payRequest?.body, {
     out: true,
     bolt11: "lnbc21creator",
     extra: { wired_idempotency_key: "payout-1" },
     external_id: "payout-1",
   });
-  assert.equal((requests[2]?.init?.headers as Record<string, string>)["X-Api-Key"], "admin-key");
+  assert.equal((payRequest?.init?.headers as Record<string, string>)["X-Api-Key"], "admin-key");
 
   const lookedUp = await wallet.lookupPayment("payout-1");
   assert.equal(lookedUp.status, "succeeded");
-  assert.match(requests[3]?.url || "", /external_id=payout-1$/);
+  assert.ok(requests.some((request) => /external_id=payout-1$/.test(request.url)));
 });

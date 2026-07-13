@@ -7,6 +7,7 @@ test("FakeWallet exposes deterministic invoice settlement and outgoing payment b
   const invoice = await wallet.createInvoice({
     amountMsat: 42_000,
     descriptionHash: "ab".repeat(32),
+    idempotencyKey: "zap:1",
   });
 
   assert.equal((await wallet.lookupInvoice(invoice.paymentHash)).status, "pending");

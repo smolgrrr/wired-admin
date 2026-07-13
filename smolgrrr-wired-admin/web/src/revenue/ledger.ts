@@ -195,6 +195,15 @@ export class RevenueLedger {
         ON revenue_payouts (payout_key)
         WHERE state IN ('attempting', 'ambiguous');
     `);
+    const enrollmentColumns = this.#database
+      .prepare("PRAGMA table_info(revenue_enrollments)")
+      .all() as Array<{ name: string }>;
+    if (!enrollmentColumns.some((column) => column.name === "address_key_version")) {
+      this.#database.exec(`
+        ALTER TABLE revenue_enrollments
+        ADD COLUMN address_key_version INTEGER NOT NULL DEFAULT 1 CHECK (address_key_version > 0)
+      `);
+    }
   }
 
   createEnrollment(enrollment: RevenueEnrollment): RevenueEnrollment {
@@ -598,7 +607,7 @@ export class RevenueLedger {
     return (this.#database
       .prepare(`
         SELECT * FROM revenue_payouts
-        WHERE state IN ('deferred', 'ambiguous')
+        WHERE state IN ('attempting', 'deferred', 'ambiguous')
           AND COALESCE(next_attempt_at, 0) <= ?
         ORDER BY updated_at
       `)
@@ -614,6 +623,13 @@ export class RevenueLedger {
       `)
       .get(payoutKey) as EnrollmentRow | undefined;
     return row ? this.#mapEnrollment(row) : null;
+  }
+
+  enrollmentKeyVersions(): number[] {
+    const rows = this.#database
+      .prepare("SELECT DISTINCT address_key_version AS version FROM revenue_enrollments ORDER BY version")
+      .all() as Array<{ version: number }>;
+    return rows.map((row) => Number(row.version));
   }
 
   wiredRevenueMsat(): number {

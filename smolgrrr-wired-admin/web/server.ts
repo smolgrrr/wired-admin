@@ -429,6 +429,24 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
+function parseRevenueHistoricalKeys(rawValue: unknown): Record<number, Uint8Array> {
+  const raw = String(rawValue || "").trim();
+  if (!raw) return {};
+  const value = JSON.parse(raw) as unknown;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("REVENUE_ENCRYPTION_PREVIOUS_KEYS must be a JSON object");
+  }
+  const keys: Record<number, Uint8Array> = {};
+  for (const [rawVersion, rawKey] of Object.entries(value)) {
+    const version = Number(rawVersion);
+    if (!Number.isSafeInteger(version) || version < 1 || typeof rawKey !== "string") {
+      throw new Error("REVENUE_ENCRYPTION_PREVIOUS_KEYS contains an invalid key version");
+    }
+    keys[version] = hexToBytes(rawKey);
+  }
+  return keys;
+}
+
 function parseNostrSecretKey(rawValue: unknown): Uint8Array | null {
   const raw = String(rawValue || "").trim();
   if (!raw) return null;
@@ -1383,6 +1401,9 @@ if (revenueEnabled) {
     databaseFile: revenueDatabaseFile,
     encryptionKey: hexToBytes(encryptionKey),
     encryptionKeyVersion: Math.max(1, Number(process.env.REVENUE_ENCRYPTION_KEY_VERSION || 1)),
+    historicalEncryptionKeys: parseRevenueHistoricalKeys(
+      process.env.REVENUE_ENCRYPTION_PREVIOUS_KEYS,
+    ),
     recipientSecretKey: secretKey,
     relayUrl: revenueRelayUrl,
     callbackUrl: `${revenuePublicBaseUrl}/api/revenue/zap`,

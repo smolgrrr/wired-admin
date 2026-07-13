@@ -37,6 +37,7 @@ type RevenueServiceOptions = {
   payoutsEnabled?: boolean;
   maxRoutingFeeMsat?: number;
   encryptionKeyVersion?: number;
+  historicalEncryptionKeys?: Record<number, Uint8Array>;
 };
 
 type PostingPath = RevenueEnrollment["postingPath"];
@@ -97,7 +98,11 @@ export class RevenueService {
 
   constructor(options: RevenueServiceOptions) {
     this.#ledger = new RevenueLedger(options.databaseFile);
-    this.#vault = new AddressVault(options.encryptionKey, options.encryptionKeyVersion);
+    this.#vault = new AddressVault(
+      options.encryptionKey,
+      options.encryptionKeyVersion,
+      options.historicalEncryptionKeys,
+    );
     this.#recipientSecretKey = options.recipientSecretKey;
     this.#recipientPubkey = getPublicKey(options.recipientSecretKey);
     this.#relayUrl = options.relayUrl;
@@ -138,6 +143,11 @@ export class RevenueService {
     if ((status.payouts.ambiguous || 0) > 0) alerts.push("ambiguous payouts require provider reconciliation");
     if (status.creatorReservedMsat > 0) alerts.push("creator funds are reserved in active payouts");
     if (status.wiredRevenueMsat < 0) alerts.push("Wired fee balance is negative");
+    const unavailableKeyVersions = this.#ledger.enrollmentKeyVersions()
+      .filter((version) => !this.#vault.hasKeyVersion(version));
+    if (unavailableKeyVersions.length > 0) {
+      alerts.push(`missing revenue encryption key versions: ${unavailableKeyVersions.join(", ")}`);
+    }
     return {
       walletBackend: this.#wallet.backend,
       controls: {
@@ -241,6 +251,7 @@ export class RevenueService {
       const walletInvoice = await this.#wallet.createInvoice({
         amountMsat: input.amountMsat,
         descriptionHash,
+        idempotencyKey: request.id,
       });
       const invoice: RevenueInvoice = {
         paymentHash: walletInvoice.paymentHash,
@@ -349,8 +360,11 @@ export class RevenueService {
     }
     for (const payout of this.#ledger.duePayouts(now)) {
       try {
-        if (payout.state === "ambiguous" && payout.providerPaymentId) {
-          const payment = await this.#wallet.lookupPayment(payout.providerPaymentId);
+        if (payout.state === "attempting" || payout.state === "ambiguous") {
+          const payment = await this.#wallet.lookupPayment(
+            payout.providerPaymentId || payout.payoutId,
+            payout.amountMsat,
+          );
           if (payment.status === "succeeded") {
             this.#ledger.completePayout({
               payoutId: payout.payoutId,

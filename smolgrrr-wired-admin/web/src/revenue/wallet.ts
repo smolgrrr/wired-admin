@@ -16,7 +16,11 @@ export type WalletPayment = {
 
 export interface RevenueWallet {
   readonly backend: string;
-  createInvoice(input: { amountMsat: number; descriptionHash: string }): Promise<WalletInvoice>;
+  createInvoice(input: {
+    amountMsat: number;
+    descriptionHash: string;
+    idempotencyKey: string;
+  }): Promise<WalletInvoice>;
   lookupInvoice(paymentHash: string): Promise<Omit<WalletInvoice, "invoice">>;
   estimateFeeMsat(invoice: string): Promise<number>;
   payInvoice(input: {
@@ -24,5 +28,5 @@ export interface RevenueWallet {
     idempotencyKey: string;
     amountMsat: number;
   }): Promise<WalletPayment>;
-  lookupPayment(paymentId: string): Promise<WalletPayment>;
+  lookupPayment(paymentId: string, expectedAmountMsat?: number): Promise<WalletPayment>;
 }

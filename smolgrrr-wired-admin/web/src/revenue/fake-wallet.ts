@@ -7,11 +7,19 @@ type FakeInvoice = WalletInvoice & { settledAt?: number };
 export class FakeWallet implements RevenueWallet {
   readonly backend = "fake";
   readonly #invoices = new Map<string, FakeInvoice>();
+  readonly #invoiceIds = new Map<string, string>();
   readonly #payments = new Map<string, WalletPayment>();
   #invoiceSequence = 0;
   #settlementSequence = 0;
 
-  async createInvoice(input: { amountMsat: number; descriptionHash: string }): Promise<WalletInvoice> {
+  async createInvoice(input: {
+    amountMsat: number;
+    descriptionHash: string;
+    idempotencyKey: string;
+  }): Promise<WalletInvoice> {
+    const existingHash = this.#invoiceIds.get(input.idempotencyKey);
+    const existing = existingHash ? this.#invoices.get(existingHash) : undefined;
+    if (existing) return { ...existing };
     if (!Number.isSafeInteger(input.amountMsat) || input.amountMsat <= 0) {
       throw new Error("invoice amount must be positive integer millisatoshis");
     }
@@ -30,6 +38,7 @@ export class FakeWallet implements RevenueWallet {
       status: "pending",
     };
     this.#invoices.set(paymentHash, invoice);
+    this.#invoiceIds.set(input.idempotencyKey, paymentHash);
     return { ...invoice };
   }
 
@@ -78,11 +87,18 @@ export class FakeWallet implements RevenueWallet {
     return { ...payment };
   }
 
-  async lookupPayment(paymentId: string): Promise<WalletPayment> {
+  async lookupPayment(paymentId: string, expectedAmountMsat?: number): Promise<WalletPayment> {
     const payment = this.#payments.get(paymentId) ?? Array.from(this.#payments.values()).find(
       (candidate) => candidate.paymentId === paymentId,
     );
-    if (!payment) throw new Error("payment not found");
+    if (!payment) {
+      return {
+        paymentId,
+        status: "failed",
+        amountMsat: expectedAmountMsat || 0,
+        failureReason: "payment not found",
+      };
+    }
     return { ...payment };
   }
 }

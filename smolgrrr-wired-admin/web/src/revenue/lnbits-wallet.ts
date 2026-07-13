@@ -39,9 +39,23 @@ export class LnbitsWallet implements RevenueWallet {
     if (!this.#invoiceKey || !this.#adminKey) throw new Error("LNbits invoice and admin keys are required");
   }
 
-  async createInvoice(input: { amountMsat: number; descriptionHash: string }): Promise<WalletInvoice> {
+  async createInvoice(input: {
+    amountMsat: number;
+    descriptionHash: string;
+    idempotencyKey: string;
+  }): Promise<WalletInvoice> {
     if (!Number.isSafeInteger(input.amountMsat) || input.amountMsat <= 0 || input.amountMsat % 1_000 !== 0) {
       throw new Error("LNbits invoices require a whole-satoshi millisatoshi amount");
+    }
+    const existing = await this.#findByExternalId(input.idempotencyKey, this.#invoiceKey);
+    if (existing?.payment_hash && existing.payment_request) {
+      this.#invoiceAmounts.set(existing.payment_hash, input.amountMsat);
+      return {
+        paymentHash: existing.payment_hash,
+        invoice: existing.payment_request,
+        amountMsat: input.amountMsat,
+        status: existing.paid ? "settled" : "pending",
+      };
     }
     const value = await this.#request("/api/v1/payments", this.#invoiceKey, {
       method: "POST",
@@ -50,6 +64,7 @@ export class LnbitsWallet implements RevenueWallet {
         amount: input.amountMsat / 1_000,
         memo: "",
         description_hash: input.descriptionHash,
+        external_id: input.idempotencyKey,
         ...(this.#webhookUrl ? { webhook: this.#webhookUrl } : {}),
       },
     });
@@ -113,22 +128,31 @@ export class LnbitsWallet implements RevenueWallet {
     return feeMsat;
   }
 
-  async lookupPayment(paymentId: string): Promise<WalletPayment> {
+  async lookupPayment(paymentId: string, expectedAmountMsat?: number): Promise<WalletPayment> {
     let value: LnbitsPayment;
-    const byExternalId = await this.#fetch(
-      `${this.#endpoint}/api/v1/payments?external_id=${encodeURIComponent(paymentId)}`,
-      {
+    const byExternalId = await this.#findByExternalId(paymentId, this.#adminKey);
+    if (byExternalId) {
+      value = byExternalId;
+    } else {
+      const response = await this.#fetch(`${this.#endpoint}/api/v1/payments/${encodeURIComponent(paymentId)}`, {
         headers: { Accept: "application/json", "X-Api-Key": this.#adminKey },
         signal: AbortSignal.timeout(15_000),
-      },
-    );
-    const matches = await byExternalId.json().catch(() => null) as LnbitsPayment[] | null;
-    if (byExternalId.ok && Array.isArray(matches) && matches[0]) {
-      value = matches[0];
-    } else {
-      value = await this.#request(`/api/v1/payments/${encodeURIComponent(paymentId)}`, this.#adminKey);
+      });
+      if (response.status === 404) {
+        return {
+          paymentId,
+          status: "failed",
+          amountMsat: expectedAmountMsat || 0,
+          failureReason: "payment not found",
+        };
+      }
+      const parsed = await response.json().catch(() => null) as LnbitsPayment | null;
+      if (!response.ok || !parsed) throw new Error(`LNbits request failed with HTTP ${response.status}`);
+      value = parsed;
     }
-    const amountMsat = this.#paymentAmounts.get(paymentId) ?? Math.abs(Number(value.amount || 0));
+    const amountMsat = this.#paymentAmounts.get(paymentId)
+      ?? expectedAmountMsat
+      ?? Math.abs(Number(value.amount || 0));
     if (!Number.isSafeInteger(amountMsat) || amountMsat <= 0) throw new Error("LNbits payment amount is missing");
     return {
       paymentId,
@@ -137,6 +161,21 @@ export class LnbitsWallet implements RevenueWallet {
       feeMsat: Math.abs(Number(value.fee || 0)),
       ...(!value.paid && !value.pending && value.detail ? { failureReason: value.detail } : {}),
     };
+  }
+
+  async #findByExternalId(externalId: string, key: string): Promise<LnbitsPayment | null> {
+    const response = await this.#fetch(
+      `${this.#endpoint}/api/v1/payments?external_id=${encodeURIComponent(externalId)}`,
+      {
+        headers: { Accept: "application/json", "X-Api-Key": key },
+        signal: AbortSignal.timeout(15_000),
+      },
+    );
+    const matches = await response.json().catch(() => null) as LnbitsPayment[] | null;
+    if (!response.ok || !Array.isArray(matches)) {
+      throw new Error(`LNbits request failed with HTTP ${response.status}`);
+    }
+    return matches[0] || null;
   }
 
   async #request(

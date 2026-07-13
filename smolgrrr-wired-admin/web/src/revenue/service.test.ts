@@ -191,7 +191,7 @@ test("an ambiguous outgoing payment stays reserved until provider reconciliation
     readonly incoming = new FakeWallet();
     readonly payments = new Map<string, WalletPayment>();
 
-    createInvoice(input: { amountMsat: number; descriptionHash: string }) {
+    createInvoice(input: { amountMsat: number; descriptionHash: string; idempotencyKey: string }) {
       return this.incoming.createInvoice(input);
     }
 
