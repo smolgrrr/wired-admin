@@ -30,6 +30,10 @@ import { createFeedSnapshotService } from "./src/feed-snapshot-service.js";
 import { registerHttpRoutes } from "./src/http-routes.js";
 import { createRelayGateway } from "./src/relay-gateway.js";
 import { createHttpAccess } from "./src/http-access.js";
+import { FakeWallet, createWalletFromConfig } from "./src/revenue/fake-wallet.js";
+import { registerRevenueRoutes } from "./src/revenue/http-routes.js";
+import { RevenueService } from "./src/revenue/service.js";
+import { StagingLightningAddressResolver } from "./src/revenue/lightning-address.js";
 import type {
   ConfessStatus,
   ConfessXStatus,
@@ -74,6 +78,8 @@ const confessStoreFile =
   process.env.CONFESS_STORE_FILE || path.join(dataDir, "confess.json");
 const wiredAccountStoreFile =
   process.env.WIRED_ACCOUNT_STORE_FILE || path.join(dataDir, "wired-account.json");
+const revenueDatabaseFile =
+  process.env.REVENUE_DATABASE_FILE || path.join(dataDir, "revenue.sqlite");
 const refreshSeconds = Number(process.env.FEED_SNAPSHOT_REFRESH_SECONDS || 300);
 const snapshotAgeHours = Number(process.env.FEED_SNAPSHOT_AGE_HOURS || 24);
 const snapshotTimeoutMs = Number(process.env.FEED_SNAPSHOT_TIMEOUT_MS || 20_000);
@@ -205,13 +211,25 @@ const feedSnapshot = createFeedSnapshotService({
   moderation,
 });
 const publicHostPatterns = readEnvList("PUBLIC_HOSTS", []).map(normalizeConfiguredHost).filter(Boolean);
+const revenueEnabled = readEnvFlag("REVENUE_ENABLED", false);
+const revenuePublicBaseUrl = String(process.env.REVENUE_PUBLIC_BASE_URL || "")
+  .trim()
+  .replace(/\/+$/, "");
+const revenueRelayUrl = normalizeRelayUrl(
+  String(process.env.REVENUE_RELAY_URL || wiredAccountRelays[0] || "").trim(),
+);
+const revenueLnurlUsername = String(process.env.REVENUE_LNURL_USERNAME || "wired").trim();
+const revenueReconcileSeconds = Math.max(
+  15,
+  Number(process.env.REVENUE_RECONCILE_SECONDS || 60),
+);
 
 const relayInfo: RelayInfo = {
   name: process.env.RELAY_NAME || "Wired Admin",
   description:
     process.env.RELAY_DESCRIPTION ||
     "A Wired proof-of-work Nostr relay backed by strfry.",
-  supported_nips: [1, 9, 11, 13, 15, 20, 22, 33, 40],
+  supported_nips: [1, 9, 11, 13, 15, 20, 22, 33, 40, 57],
   software:
     process.env.RELAY_SOFTWARE ||
     "https://github.com/smolgrrr/wired-admin",
@@ -1147,7 +1165,7 @@ function publicConfessXMirror(mirror: ConfessXMirror | undefined): PublicConfess
   return result;
 }
 
-async function createWiredAccountPost(admissionEvent: unknown) {
+async function createWiredAccountPost(admissionEvent: unknown, payoutAddress?: string) {
   const secretKey = parseWiredAccountSecretKey();
   if (!secretKey) {
     const error: HttpError = new Error("Wired account is not configured");
@@ -1195,8 +1213,39 @@ async function createWiredAccountPost(admissionEvent: unknown) {
       throw error;
     }
 
-    const acceptedRelays = await publishWiredAccountEvent(event);
+    const hasRevenueTag = event.tags.some((tag) => tag[0] === "zap");
+    if (hasRevenueTag !== Boolean(payoutAddress)) {
+      const error: HttpError = new Error(
+        hasRevenueTag
+          ? "Wired revenue tag requires a private payout address"
+          : "private payout address requires a Wired revenue tag",
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+    if (payoutAddress && !revenueService) {
+      const error: HttpError = new Error("Wired revenue routing is unavailable");
+      error.statusCode = 503;
+      throw error;
+    }
+
+    const revenueEnrollment = payoutAddress && revenueService
+      ? revenueService.enrollEvent({
+          event,
+          address: payoutAddress,
+          postingPath: "wired-account",
+        })
+      : null;
+
+    let acceptedRelays: string[];
+    try {
+      acceptedRelays = await publishWiredAccountEvent(event);
+    } catch (error) {
+      if (revenueEnrollment) revenueService?.failEnrollment(revenueEnrollment.enrollmentId);
+      throw error;
+    }
     if (acceptedRelays.length === 0) {
+      if (revenueEnrollment) revenueService?.failEnrollment(revenueEnrollment.enrollmentId);
       const error: HttpError = new Error("no relay accepted the Wired account post");
       error.statusCode = 502;
       throw error;
@@ -1215,11 +1264,13 @@ async function createWiredAccountPost(admissionEvent: unknown) {
     };
     store.posts.push(record);
     await writeWiredAccountStore(store);
+    if (revenueEnrollment) revenueService?.activateEnrollment(revenueEnrollment.enrollmentId);
 
     return {
       event,
       acceptedRelays,
       minimumPow: wiredAccountMinPow,
+      revenueEnrolled: Boolean(revenueEnrollment),
     };
   });
 }
@@ -1306,9 +1357,80 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
+let revenueService: RevenueService | null = null;
+let revenueFakeWallet: FakeWallet | undefined;
+if (revenueEnabled) {
+  const secretKey = parseWiredAccountSecretKey();
+  const encryptionKey = String(process.env.REVENUE_ENCRYPTION_KEY || "").trim();
+  if (!secretKey) throw new Error("REVENUE_ENABLED requires WIRED_NOSTR_SECRET_KEY");
+  if (!/^[0-9a-f]{64}$/i.test(encryptionKey)) {
+    throw new Error("REVENUE_ENABLED requires a 32-byte hex REVENUE_ENCRYPTION_KEY");
+  }
+  if (!revenuePublicBaseUrl.startsWith("https://")) {
+    throw new Error("REVENUE_ENABLED requires an HTTPS REVENUE_PUBLIC_BASE_URL");
+  }
+  const wallet = createWalletFromConfig({
+    backend: String(process.env.REVENUE_WALLET_BACKEND || "fake").trim().toLowerCase(),
+    nodeEnv: String(process.env.NODE_ENV || "development"),
+    allowFakeInProduction: readEnvFlag("REVENUE_ALLOW_FAKE_WALLET", false),
+    lnbitsEndpoint: process.env.REVENUE_LNBITS_ENDPOINT || "",
+    lnbitsInvoiceKey: process.env.REVENUE_LNBITS_INVOICE_KEY || "",
+    lnbitsAdminKey: process.env.REVENUE_LNBITS_ADMIN_KEY || "",
+  });
+  if (wallet instanceof FakeWallet) revenueFakeWallet = wallet;
+  revenueService = new RevenueService({
+    databaseFile: revenueDatabaseFile,
+    encryptionKey: hexToBytes(encryptionKey),
+    recipientSecretKey: secretKey,
+    relayUrl: revenueRelayUrl,
+    callbackUrl: `${revenuePublicBaseUrl}/api/revenue/zap`,
+    wallet,
+    ...(wallet instanceof FakeWallet
+      ? { addressResolver: new StagingLightningAddressResolver() }
+      : {}),
+    enrollmentEnabled: readEnvFlag("REVENUE_ACCEPT_ENROLLMENTS", true),
+    invoicesEnabled: readEnvFlag("REVENUE_ACCEPT_INVOICES", true),
+    payoutsEnabled: readEnvFlag("REVENUE_SEND_PAYOUTS", true),
+    maxRoutingFeeMsat: Math.max(0, Number(process.env.REVENUE_MAX_ROUTING_FEE_MSAT || 5_000)),
+    publishReceipt: (event) =>
+      publishNostrEvent(event, wiredAccountRelays, wiredAccountPublishTimeoutMs),
+  });
+}
+
+async function publishRevenueProfile(): Promise<void> {
+  if (!revenueService || !readEnvFlag("REVENUE_PUBLISH_PROFILE", false)) return;
+  const secretKey = parseWiredAccountSecretKey();
+  if (!secretKey) return;
+  const host = new URL(revenuePublicBaseUrl).hostname;
+  const event = finalizeEvent({
+    kind: 0,
+    content: JSON.stringify({
+      name: "Wired",
+      display_name: "Wired",
+      about: "Proof-of-work posts routed through Wired.",
+      lud16: `${revenueLnurlUsername}@${host}`,
+    }),
+    tags: [],
+    created_at: Math.floor(Date.now() / 1000),
+  }, secretKey);
+  const accepted = await publishNostrEvent(event, wiredAccountRelays, wiredAccountPublishTimeoutMs);
+  if (accepted.length === 0) throw new Error("no relay accepted the Wired revenue profile");
+}
+
 app.disable("x-powered-by");
 app.use(express.json({ limit: "128kb" }));
 app.use(httpAccess.middleware);
+
+if (revenueService) {
+  registerRevenueRoutes(app, {
+    service: revenueService,
+    ...(revenueFakeWallet ? { fakeWallet: revenueFakeWallet } : {}),
+    isAdminAuthorized: httpAccess.isAdminAuthorized,
+    lnurlUsername: revenueLnurlUsername,
+    minSendableMsat: Math.max(1_000, Number(process.env.REVENUE_MIN_SENDABLE_MSAT || 1_000)),
+    maxSendableMsat: Math.max(1_000, Number(process.env.REVENUE_MAX_SENDABLE_MSAT || 100_000_000_000)),
+  });
+}
 
 registerHttpRoutes(app, {
   backendUrl,
@@ -1361,7 +1483,26 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`Wired Admin gateway listening on ${port}`);
   console.log(`Proxying Nostr traffic to ${backendUrl}`);
   console.log(`Feed snapshot cache: ${snapshotCacheFile}`);
+  if (revenueService) {
+    console.log(`Revenue routing enabled with ${revenueService.publicConfig().walletBackend}`);
+  }
 });
+
+server.on("close", () => revenueService?.close());
+
+if (revenueService) {
+  void publishRevenueProfile().catch(() => {
+    console.error("Wired revenue profile publication failed");
+  });
+  void revenueService.reconcileAll().catch(() => {
+    console.error("initial revenue reconciliation failed");
+  });
+  setInterval(() => {
+    void revenueService?.reconcileAll().catch(() => {
+      console.error("scheduled revenue reconciliation failed");
+    });
+  }, revenueReconcileSeconds * 1000).unref();
+}
 
 void feedSnapshot.refresh().catch(() => {
   if (!feedSnapshot.current()) console.error(feedSnapshot.lastRefreshError() || "initial refresh failed");

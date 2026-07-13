@@ -39,6 +39,7 @@ type RegisterHttpRoutesDeps = {
   confessStatusFromStore: ConfessStatusFromStore;
   createWiredAccountPost: (
     event: unknown,
+    payoutAddress?: string,
   ) => Promise<Omit<CreateWiredAccountPostResponse, "ok">>;
   createConfession: (event: unknown) => Promise<Omit<CreateConfessionResponse, "ok">>;
   feedSnapshot: FeedSnapshotService;
@@ -205,7 +206,10 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
 
   app.post("/api/wired-account/posts", async (req: Request, res: Response) => {
     try {
-      const result = await createWiredAccountPost(req.body?.event);
+      const result = await createWiredAccountPost(
+        req.body?.event,
+        typeof req.body?.payoutAddress === "string" ? req.body.payoutAddress : undefined,
+      );
       res.status(201).json({ ok: true, ...result });
     } catch (error) {
       const httpError = error as HttpError;

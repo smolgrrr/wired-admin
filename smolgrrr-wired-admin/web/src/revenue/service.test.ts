@@ -1,0 +1,291 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import {
+  finalizeEvent,
+  generateSecretKey,
+  getPublicKey,
+  verifyEvent,
+  type EventTemplate,
+} from "nostr-tools";
+import { FakeWallet } from "./fake-wallet.js";
+import { RevenueService } from "./service.js";
+import type { RevenueWallet, WalletPayment } from "./wallet.js";
+
+test("an enrolled event receives one settled NIP-57 zap and one public receipt", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-service-"));
+  const wallet = new FakeWallet();
+  const recipientSecret = generateSecretKey();
+  const recipientPubkey = getPublicKey(recipientSecret);
+  const relayUrl = "wss://staging.wiredsignal.online";
+  const publishedReceipts: unknown[] = [];
+  const service = new RevenueService({
+    databaseFile: path.join(directory, "revenue.sqlite"),
+    encryptionKey: Buffer.alloc(32, 7),
+    recipientSecretKey: recipientSecret,
+    relayUrl,
+    callbackUrl: "https://staging.wiredsignal.online/api/revenue/zap",
+    wallet,
+    publishReceipt: async (event) => {
+      publishedReceipts.push(event);
+      return [relayUrl];
+    },
+  });
+
+  try {
+    const creatorSecret = generateSecretKey();
+    const event = finalizeEvent({
+      kind: 1,
+      content: "one private payout destination",
+      created_at: 1,
+      tags: [["zap", recipientPubkey, relayUrl]],
+    } satisfies EventTemplate, creatorSecret);
+    const address = "creator@example.com";
+    const enrollment = service.enrollEvent({ event, address, postingPath: "browser" });
+    service.activateEnrollment(enrollment.enrollmentId);
+
+    const zapperSecret = generateSecretKey();
+    const zapRequest = finalizeEvent({
+      kind: 9734,
+      content: "",
+      created_at: 2,
+      tags: [
+        ["p", recipientPubkey],
+        ["e", event.id],
+        ["amount", "10001"],
+        ["relays", relayUrl],
+      ],
+    } satisfies EventTemplate, zapperSecret);
+    const rawZapRequest = JSON.stringify(zapRequest);
+    const invoice = await service.createZapInvoice({
+      eventId: event.id,
+      amountMsat: 10_001,
+      rawZapRequest,
+    });
+
+    await wallet.settleInvoice(invoice.paymentHash);
+    const first = await service.reconcileInvoice(invoice.paymentHash);
+    const duplicate = await service.reconcileInvoice(invoice.paymentHash);
+
+    assert.equal(first.status, "settled");
+    assert.equal(first.creatorMsat, 7_000);
+    assert.equal(first.wiredMsat, 3_001);
+    assert.deepEqual(duplicate, first);
+    assert.equal(publishedReceipts.length, 1);
+    assert.equal(verifyEvent(first.receipt), true);
+    assert.equal(first.receipt.kind, 9735);
+    assert.deepEqual(first.receipt.tags.find((tag) => tag[0] === "e"), ["e", event.id]);
+    assert.deepEqual(first.receipt.tags.find((tag) => tag[0] === "p"), ["p", recipientPubkey]);
+    assert.equal(first.receipt.tags.find((tag) => tag[0] === "description")?.[1], rawZapRequest);
+    assert.equal(JSON.stringify(event).includes(address), false);
+    assert.equal(JSON.stringify(first.receipt).includes(address), false);
+    assert.deepEqual(service.balanceForEvent(event.id), {
+      availableMsat: 7_000,
+      reservedMsat: 0,
+      paidMsat: 0,
+    });
+  } finally {
+    service.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("creator credits automatically pay at 20 sats and defer below a destination minimum", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-payout-"));
+  const wallet = new FakeWallet();
+  const recipientSecret = generateSecretKey();
+  const recipientPubkey = getPublicKey(recipientSecret);
+  const relayUrl = "wss://staging.wiredsignal.online";
+  const requestedPayouts: Array<{ address: string; amountMsat: number }> = [];
+  let destinationMinimumMsat = 1_000;
+  const service = new RevenueService({
+    databaseFile: path.join(directory, "revenue.sqlite"),
+    encryptionKey: Buffer.alloc(32, 9),
+    recipientSecretKey: recipientSecret,
+    relayUrl,
+    callbackUrl: "https://staging.wiredsignal.online/api/revenue/zap",
+    wallet,
+    publishReceipt: async () => [relayUrl],
+    addressResolver: {
+      validate: async (address) => ({
+        address,
+        callback: "https://wallet.example/lnurl",
+        minSendableMsat: destinationMinimumMsat,
+        maxSendableMsat: 1_000_000,
+      }),
+      requestInvoice: async (address, amountMsat) => {
+        requestedPayouts.push({ address, amountMsat });
+        return `fake-invoice:creator:${amountMsat}`;
+      },
+    },
+  });
+
+  async function settleZap(address: string, grossMsat: number, sequence: number) {
+    const creatorSecret = generateSecretKey();
+    const event = finalizeEvent({
+      kind: 1,
+      content: `payout ${sequence}`,
+      created_at: 10 + sequence,
+      tags: [["zap", recipientPubkey, relayUrl]],
+    } satisfies EventTemplate, creatorSecret);
+    const enrollment = service.enrollEvent({ event, address, postingPath: "browser" });
+    service.activateEnrollment(enrollment.enrollmentId);
+    const request = finalizeEvent({
+      kind: 9734,
+      content: "",
+      created_at: 20 + sequence,
+      tags: [
+        ["p", recipientPubkey],
+        ["e", event.id],
+        ["amount", String(grossMsat)],
+        ["relays", relayUrl],
+      ],
+    } satisfies EventTemplate, generateSecretKey());
+    const invoice = await service.createZapInvoice({
+      eventId: event.id,
+      amountMsat: grossMsat,
+      rawZapRequest: JSON.stringify(request),
+    });
+    await wallet.settleInvoice(invoice.paymentHash);
+    await service.reconcileInvoice(invoice.paymentHash);
+    return event;
+  }
+
+  try {
+    const paidEvent = await settleZap("paid@example.com", 30_000, 1);
+    assert.deepEqual(requestedPayouts, [{ address: "paid@example.com", amountMsat: 21_000 }]);
+    assert.deepEqual(service.balanceForEvent(paidEvent.id), {
+      availableMsat: 0,
+      reservedMsat: 0,
+      paidMsat: 21_000,
+    });
+
+    destinationMinimumMsat = 25_000;
+    const deferredEvent = await settleZap("deferred@example.com", 30_000, 2);
+    assert.equal(requestedPayouts.length, 1);
+    assert.deepEqual(service.balanceForEvent(deferredEvent.id), {
+      availableMsat: 21_000,
+      reservedMsat: 0,
+      paidMsat: 0,
+    });
+    assert.equal(service.payoutStatusForEvent(deferredEvent.id).state, "deferred");
+  } finally {
+    service.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an ambiguous outgoing payment stays reserved until provider reconciliation proves success", async () => {
+  class TimeoutAfterPaymentWallet implements RevenueWallet {
+    readonly backend = "timeout-wallet";
+    readonly incoming = new FakeWallet();
+    readonly payments = new Map<string, WalletPayment>();
+
+    createInvoice(input: { amountMsat: number; descriptionHash: string }) {
+      return this.incoming.createInvoice(input);
+    }
+
+    lookupInvoice(paymentHash: string) {
+      return this.incoming.lookupInvoice(paymentHash);
+    }
+
+    async payInvoice(input: {
+      invoice: string;
+      idempotencyKey: string;
+      amountMsat: number;
+    }): Promise<WalletPayment> {
+      this.payments.set(input.idempotencyKey, {
+        paymentId: input.idempotencyKey,
+        status: "succeeded",
+        amountMsat: input.amountMsat,
+        feeMsat: 4,
+      });
+      throw new Error("request timed out after dispatch");
+    }
+
+    async lookupPayment(paymentId: string) {
+      const payment = this.payments.get(paymentId);
+      if (!payment) throw new Error("payment not found");
+      return payment;
+    }
+  }
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-ambiguous-"));
+  const wallet = new TimeoutAfterPaymentWallet();
+  const recipientSecret = generateSecretKey();
+  const recipientPubkey = getPublicKey(recipientSecret);
+  const relayUrl = "wss://staging.wiredsignal.online";
+  const service = new RevenueService({
+    databaseFile: path.join(directory, "revenue.sqlite"),
+    encryptionKey: Buffer.alloc(32, 11),
+    recipientSecretKey: recipientSecret,
+    relayUrl,
+    callbackUrl: "https://staging.wiredsignal.online/api/revenue/zap",
+    wallet,
+    publishReceipt: async () => [relayUrl],
+    addressResolver: {
+      validate: async (address) => ({
+        address,
+        callback: "https://wallet.example/lnurl",
+        minSendableMsat: 1_000,
+        maxSendableMsat: 1_000_000,
+      }),
+      requestInvoice: async (_address, amountMsat) => `invoice:${amountMsat}`,
+    },
+  });
+
+  try {
+    const event = finalizeEvent({
+      kind: 1,
+      content: "ambiguous payout",
+      created_at: 31,
+      tags: [["zap", recipientPubkey, relayUrl]],
+    } satisfies EventTemplate, generateSecretKey());
+    const enrollment = service.enrollEvent({
+      event,
+      address: "ambiguous@example.com",
+      postingPath: "browser",
+    });
+    service.activateEnrollment(enrollment.enrollmentId);
+    const request = finalizeEvent({
+      kind: 9734,
+      content: "",
+      created_at: 32,
+      tags: [
+        ["p", recipientPubkey],
+        ["e", event.id],
+        ["amount", "30000"],
+        ["relays", relayUrl],
+      ],
+    } satisfies EventTemplate, generateSecretKey());
+    const invoice = await service.createZapInvoice({
+      eventId: event.id,
+      amountMsat: 30_000,
+      rawZapRequest: JSON.stringify(request),
+    });
+    await wallet.incoming.settleInvoice(invoice.paymentHash);
+    await service.reconcileInvoice(invoice.paymentHash);
+
+    assert.equal(service.payoutStatusForEvent(event.id).state, "ambiguous");
+    assert.deepEqual(service.balanceForEvent(event.id), {
+      availableMsat: 0,
+      reservedMsat: 21_000,
+      paidMsat: 0,
+    });
+
+    const payout = service.payoutStatusForEvent(event.id);
+    wallet.payments.set(payout.providerPaymentId as string, wallet.payments.values().next().value as WalletPayment);
+    await service.reconcileAll(Date.now() + 61_000);
+    assert.equal(service.payoutStatusForEvent(event.id).state, "succeeded");
+    assert.deepEqual(service.balanceForEvent(event.id), {
+      availableMsat: 0,
+      reservedMsat: 0,
+      paidMsat: 21_000,
+    });
+  } finally {
+    service.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
