@@ -72,8 +72,10 @@ Optional environment variables:
   financial liabilities
 - `STAGING_REVENUE_SEND_PAYOUTS`: defaults to `false` for the staged real-sat
   canary; set `true` only after reconciling the incoming zap
+- `STAGING_REVENUE_MINIMUM_PAYOUT_MSAT`: defaults to `14000`, so a standard
+  21-sat zap can immediately release its 14-sat whole-satoshi creator share
 - `STAGING_REVENUE_MIN_SENDABLE_MSAT`: defaults to `1000`
-- `STAGING_REVENUE_MAX_SENDABLE_MSAT`: defaults to `29000` during the canary and
+- `STAGING_REVENUE_MAX_SENDABLE_MSAT`: defaults to `21000` during the canary and
   is enforced by the callback, not only advertised in LNURL metadata
 - `STAGING_SMOKE_BASE_URL`: smoke-test base URL, defaults to the local Umbrel app
   URL on `STAGING_PORT`
@@ -129,7 +131,7 @@ VITE_REVENUE_API_BASE=https://staging.wiredsignal.online
 ## Revenue testing and managed-wallet cutover
 
 Staging deploys with FakeWallet. Use it to verify enrollment, NIP-57 invoice
-creation, the exact 70/30 ledger split, receipt publication, the 20-sat payout
+creation, the exact 70/30 ledger split, receipt publication, the 14-sat payout
 threshold, and deferred payout behavior without spending sats.
 
 For the final real-sat canary, configure the Blink settings above, set

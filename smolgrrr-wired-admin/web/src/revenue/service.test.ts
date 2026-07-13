@@ -14,6 +14,27 @@ import { FakeWallet } from "./fake-wallet.js";
 import { RevenueService } from "./service.js";
 import type { RevenueWallet, WalletPayment } from "./wallet.js";
 
+test("an invalid minimum payout configuration safely defaults to 14 sats", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-config-"));
+  const service = new RevenueService({
+    databaseFile: path.join(directory, "revenue.sqlite"),
+    encryptionKey: Buffer.alloc(32, 6),
+    recipientSecretKey: generateSecretKey(),
+    relayUrl: "wss://staging.wiredsignal.online",
+    callbackUrl: "https://staging.wiredsignal.online/api/revenue/zap",
+    wallet: new FakeWallet(),
+    minimumPayoutMsat: Number.NaN,
+    publishReceipt: async () => [],
+  });
+
+  try {
+    assert.equal(service.operatorStatus().controls.minimumPayoutMsat, 14_000);
+  } finally {
+    service.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("an enrolled event receives one settled NIP-57 zap and one public receipt", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-service-"));
   const wallet = new FakeWallet();
@@ -100,7 +121,7 @@ test("an enrolled event receives one settled NIP-57 zap and one public receipt",
   }
 });
 
-test("creator credits automatically pay at 20 sats and defer below a destination minimum", async () => {
+test("a 21-sat zap immediately pays 14 sats and defers below a destination minimum", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-payout-"));
   const wallet = new FakeWallet();
   const recipientSecret = generateSecretKey();
@@ -115,6 +136,7 @@ test("creator credits automatically pay at 20 sats and defer below a destination
     relayUrl,
     callbackUrl: "https://staging.wiredsignal.online/api/revenue/zap",
     wallet,
+    minimumPayoutMsat: 14_000,
     publishReceipt: async () => [relayUrl],
     addressResolver: {
       validate: async (address) => ({
@@ -162,19 +184,19 @@ test("creator credits automatically pay at 20 sats and defer below a destination
   }
 
   try {
-    const paidEvent = await settleZap("paid@example.com", 30_002, 1);
-    assert.deepEqual(requestedPayouts, [{ address: "paid@example.com", amountMsat: 21_000 }]);
+    const paidEvent = await settleZap("paid@example.com", 21_000, 1);
+    assert.deepEqual(requestedPayouts, [{ address: "paid@example.com", amountMsat: 14_000 }]);
     assert.deepEqual(service.balanceForEvent(paidEvent.id), {
-      availableMsat: 1,
+      availableMsat: 700,
       reservedMsat: 0,
-      paidMsat: 21_000,
+      paidMsat: 14_000,
     });
 
-    destinationMinimumMsat = 25_000;
-    const deferredEvent = await settleZap("deferred@example.com", 30_000, 2);
+    destinationMinimumMsat = 15_000;
+    const deferredEvent = await settleZap("deferred@example.com", 21_000, 2);
     assert.equal(requestedPayouts.length, 1);
     assert.deepEqual(service.balanceForEvent(deferredEvent.id), {
-      availableMsat: 21_000,
+      availableMsat: 14_700,
       reservedMsat: 0,
       paidMsat: 0,
     });

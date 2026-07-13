@@ -33,7 +33,10 @@ import { createHttpAccess } from "./src/http-access.js";
 import { FakeWallet } from "./src/revenue/fake-wallet.js";
 import { createWalletFromConfig } from "./src/revenue/wallet-factory.js";
 import { registerRevenueRoutes } from "./src/revenue/http-routes.js";
-import { RevenueService } from "./src/revenue/service.js";
+import {
+  DEFAULT_MINIMUM_PAYOUT_MSAT,
+  RevenueService,
+} from "./src/revenue/service.js";
 import { StagingLightningAddressResolver } from "./src/revenue/lightning-address.js";
 import type {
   ConfessStatus,
@@ -1421,6 +1424,9 @@ if (revenueEnabled) {
     enrollmentEnabled: readEnvFlag("REVENUE_ACCEPT_ENROLLMENTS", true),
     invoicesEnabled: readEnvFlag("REVENUE_ACCEPT_INVOICES", true),
     payoutsEnabled: readEnvFlag("REVENUE_SEND_PAYOUTS", true),
+    minimumPayoutMsat: Number(
+      process.env.REVENUE_MINIMUM_PAYOUT_MSAT || DEFAULT_MINIMUM_PAYOUT_MSAT,
+    ),
     maxRoutingFeeMsat: Math.max(0, Number(process.env.REVENUE_MAX_ROUTING_FEE_MSAT || 5_000)),
     paymentNotFoundGraceMs: Math.max(
       60_000,

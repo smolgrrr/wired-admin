@@ -35,6 +35,7 @@ type RevenueServiceOptions = {
   enrollmentEnabled?: boolean;
   invoicesEnabled?: boolean;
   payoutsEnabled?: boolean;
+  minimumPayoutMsat?: number;
   maxRoutingFeeMsat?: number;
   encryptionKeyVersion?: number;
   historicalEncryptionKeys?: Record<number, Uint8Array>;
@@ -42,6 +43,8 @@ type RevenueServiceOptions = {
 };
 
 type PostingPath = RevenueEnrollment["postingPath"];
+
+export const DEFAULT_MINIMUM_PAYOUT_MSAT = 14_000;
 
 export type ZapInvoiceResult = {
   paymentHash: string;
@@ -94,6 +97,7 @@ export class RevenueService {
   readonly #enrollmentEnabled: boolean;
   readonly #invoicesEnabled: boolean;
   readonly #payoutsEnabled: boolean;
+  readonly #minimumPayoutMsat: number;
   readonly #maxRoutingFeeMsat: number;
   readonly #paymentNotFoundGraceMs: number;
   #invoiceCreationQueue: Promise<unknown> = Promise.resolve();
@@ -115,6 +119,10 @@ export class RevenueService {
     this.#enrollmentEnabled = options.enrollmentEnabled ?? true;
     this.#invoicesEnabled = options.invoicesEnabled ?? true;
     this.#payoutsEnabled = options.payoutsEnabled ?? true;
+    const configuredMinimumPayoutMsat = options.minimumPayoutMsat ?? DEFAULT_MINIMUM_PAYOUT_MSAT;
+    this.#minimumPayoutMsat = Number.isFinite(configuredMinimumPayoutMsat)
+      ? Math.max(1_000, Math.floor(configuredMinimumPayoutMsat / 1_000) * 1_000)
+      : DEFAULT_MINIMUM_PAYOUT_MSAT;
     this.#maxRoutingFeeMsat = Math.max(0, Math.floor(options.maxRoutingFeeMsat ?? 5_000));
     this.#paymentNotFoundGraceMs = Math.max(
       60_000,
@@ -140,7 +148,12 @@ export class RevenueService {
 
   operatorStatus(): ReturnType<RevenueLedger["status"]> & {
     walletBackend: string;
-    controls: { enrollmentEnabled: boolean; invoicesEnabled: boolean; payoutsEnabled: boolean };
+    controls: {
+      enrollmentEnabled: boolean;
+      invoicesEnabled: boolean;
+      payoutsEnabled: boolean;
+      minimumPayoutMsat: number;
+    };
     encryptionKeyVersion: number;
     alerts: string[];
   } {
@@ -149,7 +162,10 @@ export class RevenueService {
     if ((status.payouts.ambiguous || 0) > 0) alerts.push("ambiguous payouts require provider reconciliation");
     if (status.creatorReservedMsat > 0) alerts.push("creator funds are reserved in active payouts");
     if (status.wiredRevenueMsat < 0) alerts.push("Wired fee balance is negative");
-    if (status.creatorAvailableMsat >= 20_000 && status.wiredRevenueMsat < this.#maxRoutingFeeMsat) {
+    if (
+      status.creatorAvailableMsat >= this.#minimumPayoutMsat &&
+      status.wiredRevenueMsat < this.#maxRoutingFeeMsat
+    ) {
       alerts.push("Wired fee balance is below the payout routing-fee safety bound");
     }
     if (this.#ledger.accountingDivergenceMsat() !== 0) {
@@ -185,6 +201,7 @@ export class RevenueService {
         enrollmentEnabled: this.#enrollmentEnabled,
         invoicesEnabled: this.#invoicesEnabled,
         payoutsEnabled: this.#payoutsEnabled,
+        minimumPayoutMsat: this.#minimumPayoutMsat,
       },
       encryptionKeyVersion: this.#vault.keyVersion,
       alerts,
@@ -487,9 +504,8 @@ export class RevenueService {
 
   async #attemptPayout(enrollment: RevenueEnrollment): Promise<RevenuePayout | null> {
     if (!this.#payoutsEnabled) return null;
-    const thresholdMsat = 20_000;
     const balance = this.#ledger.balanceFor(enrollment.payoutKey);
-    if (balance.availableMsat < thresholdMsat) return null;
+    if (balance.availableMsat < this.#minimumPayoutMsat) return null;
     if (this.#ledger.wiredRevenueMsat() < this.#maxRoutingFeeMsat) {
       return this.#ledger.deferPayout({
         payoutKey: enrollment.payoutKey,
