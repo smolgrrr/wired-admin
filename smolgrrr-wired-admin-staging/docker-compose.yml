@@ -24,7 +24,7 @@ services:
       REVENUE_ENABLED: "true"
       REVENUE_DATABASE_FILE: "/app/data/revenue-blink-canary.sqlite"
       REVENUE_PUBLIC_BASE_URL: "https://staging.wiredsignal.online"
-      REVENUE_RELAY_URL: "wss://staging.wiredsignal.online"
+      REVENUE_RELAY_URL: "wss://relay.damus.io"
       REVENUE_LNURL_USERNAME: "wired"
       REVENUE_WALLET_BACKEND: "fake"
       REVENUE_ALLOW_FAKE_WALLET: "true"

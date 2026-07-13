@@ -95,6 +95,11 @@ jobs:
             echo "DEPLOY_VERSION=${{ needs.build.outputs.image_tag }}" >> "$GITHUB_ENV"
           fi
 
+      - name: Prepare revenue profile verification
+        run: |
+          npm ci --prefix smolgrrr-wired-admin/web --omit=dev --ignore-scripts
+          echo "REVENUE_PROFILE_NOT_BEFORE=$(($(date +%s) - 5))" >> "$GITHUB_ENV"
+
       - name: Deploy staging Umbrel app
         env:
           UMBREL_DIR: ${{ vars.STAGING_UMBREL_DIR || '/home/umbrel/umbrel' }}
@@ -119,7 +124,7 @@ jobs:
           WIRED_ADMIN_SET_REVENUE_ENABLED: "true"
           WIRED_ADMIN_SET_REVENUE_DATABASE_FILE: ${{ vars.STAGING_REVENUE_DATABASE_FILE || '/app/data/revenue-blink-canary.sqlite' }}
           WIRED_ADMIN_SET_REVENUE_PUBLIC_BASE_URL: https://staging.wiredsignal.online
-          WIRED_ADMIN_SET_REVENUE_RELAY_URL: wss://staging.wiredsignal.online
+          WIRED_ADMIN_SET_REVENUE_RELAY_URL: wss://relay.damus.io
           WIRED_ADMIN_SET_REVENUE_LNURL_USERNAME: wired
           WIRED_ADMIN_SET_REVENUE_WALLET_BACKEND: ${{ vars.STAGING_REVENUE_WALLET_BACKEND || 'fake' }}
           WIRED_ADMIN_SET_REVENUE_ALLOW_FAKE_WALLET: "true"
@@ -131,6 +136,7 @@ jobs:
           WIRED_ADMIN_SET_REVENUE_ACCEPT_ENROLLMENTS: ${{ vars.STAGING_REVENUE_ACCEPT_ENROLLMENTS || 'true' }}
           WIRED_ADMIN_SET_REVENUE_ACCEPT_INVOICES: ${{ vars.STAGING_REVENUE_ACCEPT_INVOICES || 'true' }}
           WIRED_ADMIN_SET_REVENUE_SEND_PAYOUTS: ${{ vars.STAGING_REVENUE_SEND_PAYOUTS || 'false' }}
+          WIRED_ADMIN_SET_REVENUE_PUBLISH_PROFILE: "true"
           WIRED_ADMIN_SET_REVENUE_MINIMUM_PAYOUT_MSAT: ${{ vars.STAGING_REVENUE_MINIMUM_PAYOUT_MSAT || '14000' }}
           WIRED_ADMIN_SET_REVENUE_MIN_SENDABLE_MSAT: ${{ vars.STAGING_REVENUE_MIN_SENDABLE_MSAT || '1000' }}
           WIRED_ADMIN_SET_REVENUE_MAX_SENDABLE_MSAT: ${{ vars.STAGING_REVENUE_MAX_SENDABLE_MSAT || '21000' }}
@@ -152,4 +158,6 @@ jobs:
         env:
           STAGING_ADMIN_TOKEN: ${{ secrets.STAGING_ADMIN_TOKEN }}
           STAGING_SMOKE_BASE_URL: ${{ vars.STAGING_SMOKE_BASE_URL || '' }}
-        run: scripts/staging-smoke-test.sh "${STAGING_SMOKE_BASE_URL:-http://127.0.0.1:${STAGING_PORT}}"
+        run: |
+          scripts/staging-smoke-test.sh "${STAGING_SMOKE_BASE_URL:-http://127.0.0.1:${STAGING_PORT}}"
+          node scripts/verify-revenue-profile.mjs "${STAGING_BASE_URL}"
