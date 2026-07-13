@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
-import type { RevenueWallet, WalletInvoice, WalletPayment } from "./wallet.js";
-import { LnbitsWallet } from "./lnbits-wallet.js";
+import type {
+  RevenueWallet,
+  WalletInvoice,
+  WalletPayment,
+  WalletPaymentLookup,
+} from "./wallet.js";
 
 type FakeInvoice = WalletInvoice & { settledAt?: number };
 
@@ -87,44 +91,17 @@ export class FakeWallet implements RevenueWallet {
     return { ...payment };
   }
 
-  async lookupPayment(paymentId: string, expectedAmountMsat?: number): Promise<WalletPayment> {
-    const payment = this.#payments.get(paymentId) ?? Array.from(this.#payments.values()).find(
-      (candidate) => candidate.paymentId === paymentId,
+  async lookupPayment(input: WalletPaymentLookup): Promise<WalletPayment> {
+    const payment = this.#payments.get(input.paymentId) ?? Array.from(this.#payments.values()).find(
+      (candidate) => candidate.paymentId === input.paymentId,
     );
     if (!payment) {
       return {
-        paymentId,
-        status: "failed",
-        amountMsat: expectedAmountMsat || 0,
-        failureReason: "payment not found",
+        paymentId: input.paymentId,
+        status: "not_found",
+        amountMsat: input.expectedAmountMsat || 0,
       };
     }
     return { ...payment };
   }
-}
-
-export function createWalletFromConfig(input: {
-  backend: string;
-  nodeEnv: string;
-  allowFakeInProduction?: boolean;
-  lnbitsEndpoint?: string;
-  lnbitsInvoiceKey?: string;
-  lnbitsAdminKey?: string;
-  lnbitsWebhookUrl?: string;
-}): RevenueWallet {
-  if (input.backend === "lnbits") {
-    return new LnbitsWallet({
-      endpoint: input.lnbitsEndpoint || "",
-      invoiceKey: input.lnbitsInvoiceKey || "",
-      adminKey: input.lnbitsAdminKey || "",
-      ...(input.lnbitsWebhookUrl ? { webhookUrl: input.lnbitsWebhookUrl } : {}),
-    });
-  }
-  if (input.backend === "fake") {
-    if (input.nodeEnv === "production" && !input.allowFakeInProduction) {
-      throw new Error("FakeWallet is disabled in production; configure a managed wallet backend");
-    }
-    return new FakeWallet();
-  }
-  throw new Error(`unsupported revenue wallet backend: ${input.backend}`);
 }

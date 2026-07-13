@@ -62,7 +62,10 @@ test("LNbits adapter creates description-hash invoices and pays with separated k
   });
   assert.equal((payRequest?.init?.headers as Record<string, string>)["X-Api-Key"], "admin-key");
 
-  const lookedUp = await wallet.lookupPayment("payout-1");
+  const lookedUp = await wallet.lookupPayment({
+    paymentId: "payout-1",
+    invoice: "lnbc21creator",
+  });
   assert.equal(lookedUp.status, "succeeded");
   assert.ok(requests.some((request) => /external_id=payout-1$/.test(request.url)));
 });

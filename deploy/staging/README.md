@@ -21,7 +21,22 @@ Create a protected `staging` environment with these secrets:
 - `STAGING_REVENUE_ENCRYPTION_KEY`: staging-only 32-byte hex key used to encrypt
   creator payout snapshots
 
-Managed-wallet secrets are optional while staging uses FakeWallet:
+Managed-wallet secrets are optional while staging uses FakeWallet. For Blink:
+
+- `STAGING_REVENUE_BLINK_API_KEY`: server-side Blink API key with Read, Receive,
+  and Write scopes
+
+Blink's non-secret settings are configured as GitHub environment variables:
+
+- `STAGING_REVENUE_BLINK_ENDPOINT`: defaults to `https://api.blink.sv/graphql`
+- `STAGING_REVENUE_BLINK_WALLET_ID`: BTC wallet that receives zaps and funds payouts
+- `STAGING_REVENUE_BLINK_ACCOUNT_ID`: expected account ID used to reject a key
+  connected to the wrong account
+- `STAGING_REVENUE_DATABASE_FILE`: defaults to the isolated canary ledger at
+  `/app/data/revenue-blink-canary.sqlite`; do not point the Blink canary at the
+  historical FakeWallet ledger
+
+The older LNbits adapter uses these secrets:
 
 - `STAGING_REVENUE_LNBITS_ENDPOINT`: HTTPS base URL of the managed LNbits instance
 - `STAGING_REVENUE_LNBITS_INVOICE_KEY`: invoice/read key for the Wired wallet
@@ -43,14 +58,23 @@ Optional environment variables:
 - `STAGING_WIRED_ACCOUNT_MIN_POW`: defaults to `STAGING_RELAY_MIN_POW`, then
   `16`
 - `STAGING_WIRED_ACCOUNT_RELAYS`: optional comma-separated publish relays
-- `STAGING_REVENUE_WALLET_BACKEND`: `fake` by default; set to `lnbits` only after
-  all three LNbits secrets are configured
+- `STAGING_REVENUE_WALLET_BACKEND`: `fake` by default; set to `blink` after the
+  Blink API key, wallet ID, and account ID are configured; `lnbits` remains
+  available for the older adapter
 - `STAGING_REVENUE_ENCRYPTION_KEY_VERSION`: defaults to `1`; increment on key
   rotation and retain old keys in `STAGING_REVENUE_ENCRYPTION_PREVIOUS_KEYS`
 - `STAGING_REVENUE_MAX_ROUTING_FEE_MSAT`: defaults to `5000`
 - `STAGING_REVENUE_PAYMENT_NOT_FOUND_GRACE_MS`: defaults to `86400000` (24
   hours), during which an unindexed outgoing payment remains reserved to prevent
   a retry from double-paying
+- `STAGING_REVENUE_ACCEPT_ENROLLMENTS`: defaults to `true`
+- `STAGING_REVENUE_ACCEPT_INVOICES`: defaults to `true`; set `false` to stop new
+  financial liabilities
+- `STAGING_REVENUE_SEND_PAYOUTS`: defaults to `false` for the staged real-sat
+  canary; set `true` only after reconciling the incoming zap
+- `STAGING_REVENUE_MIN_SENDABLE_MSAT`: defaults to `1000`
+- `STAGING_REVENUE_MAX_SENDABLE_MSAT`: defaults to `29000` during the canary and
+  is enforced by the callback, not only advertised in LNURL metadata
 - `STAGING_SMOKE_BASE_URL`: smoke-test base URL, defaults to the local Umbrel app
   URL on `STAGING_PORT`
 - `STAGING_PUBLIC_SMOKE_URLS`: optional public URLs for the deploy helper to
@@ -108,9 +132,11 @@ Staging deploys with FakeWallet. Use it to verify enrollment, NIP-57 invoice
 creation, the exact 70/30 ledger split, receipt publication, the 20-sat payout
 threshold, and deferred payout behavior without spending sats.
 
-For the final real-sat canary, add the three LNbits secrets above, set the
-staging environment variable `STAGING_REVENUE_WALLET_BACKEND=lnbits`, and rerun
-the staging workflow. Start with one low-value zap and confirm the operator
-status endpoint reports no alerts before increasing volume. Switching the
-backend does not alter production and does not require running a Lightning node
-or channels on Wired infrastructure.
+For the final real-sat canary, configure the Blink settings above, set
+`STAGING_REVENUE_WALLET_BACKEND=blink`, and rerun the staging workflow. The API
+key must have Read, Receive, and Write scopes. Start with one low-value zap and
+confirm the operator status endpoint reports no alerts before increasing
+volume. Switching the backend does not alter production and does not require
+running a Lightning node or channels on Wired infrastructure.
+
+Follow the bounded two-stage procedure in [blink-real-sat-canary.md](blink-real-sat-canary.md).

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FakeWallet, createWalletFromConfig } from "./fake-wallet.js";
+import { FakeWallet } from "./fake-wallet.js";
+import { createWalletFromConfig } from "./wallet-factory.js";
 
 test("FakeWallet exposes deterministic invoice settlement and outgoing payment behavior", async () => {
   const wallet = new FakeWallet();
@@ -42,4 +43,19 @@ test("FakeWallet cannot be configured in production", () => {
     () => createWalletFromConfig({ backend: "fake", nodeEnv: "production" }),
     /FakeWallet is disabled in production/,
   );
+});
+
+test("Blink can be selected as the managed revenue wallet", () => {
+  const wallet = createWalletFromConfig({
+    backend: "blink",
+    nodeEnv: "production",
+    blink: {
+      endpoint: "https://api.blink.sv/graphql",
+      apiKey: "blink-secret",
+      walletId: "wallet-id",
+      accountId: "account-id",
+    },
+  });
+
+  assert.equal(wallet.backend, "blink");
 });

@@ -162,10 +162,10 @@ test("creator credits automatically pay at 20 sats and defer below a destination
   }
 
   try {
-    const paidEvent = await settleZap("paid@example.com", 30_000, 1);
+    const paidEvent = await settleZap("paid@example.com", 30_002, 1);
     assert.deepEqual(requestedPayouts, [{ address: "paid@example.com", amountMsat: 21_000 }]);
     assert.deepEqual(service.balanceForEvent(paidEvent.id), {
-      availableMsat: 0,
+      availableMsat: 1,
       reservedMsat: 0,
       paidMsat: 21_000,
     });
@@ -217,14 +217,13 @@ test("an ambiguous outgoing payment stays reserved until provider reconciliation
       throw new Error("request timed out after dispatch");
     }
 
-    async lookupPayment(paymentId: string, expectedAmountMsat?: number) {
-      const payment = this.payments.get(paymentId);
+    async lookupPayment(input: { paymentId: string; expectedAmountMsat?: number; invoice: string }) {
+      const payment = this.payments.get(input.paymentId);
       if (!payment) {
         return {
-          paymentId,
-          status: "failed" as const,
-          amountMsat: expectedAmountMsat || 0,
-          failureReason: "payment not found",
+          paymentId: input.paymentId,
+          status: "not_found" as const,
+          amountMsat: input.expectedAmountMsat || 0,
         };
       }
       return payment;

@@ -105,6 +105,28 @@ test("public HTTP contract completes the FakeWallet NIP-57 revenue transaction",
     const query = new URLSearchParams({ amount: "10000", nostr: JSON.stringify(zapRequest) });
     const invoice = await fetch(`${baseUrl}/api/revenue/zap?${query}`).then(responseJson<{ pr: string }>);
     assert.match(invoice.pr, /^lnbc10n1fake[0-9a-f]{64}$/);
+    const oversizedRequest = finalizeEvent({
+      kind: 9734,
+      content: "",
+      created_at: 43,
+      tags: [
+        ["p", recipientPubkey],
+        ["e", event.id],
+        ["amount", "1000001"],
+        ["relays", relayUrl],
+      ],
+    } satisfies EventTemplate, generateSecretKey());
+    const oversizedQuery = new URLSearchParams({
+      amount: "1000001",
+      nostr: JSON.stringify(oversizedRequest),
+    });
+    const oversized = await fetch(`${baseUrl}/api/revenue/zap?${oversizedQuery}`).then(
+      responseJson<{ status: string; reason: string }>,
+    );
+    assert.deepEqual(oversized, {
+      status: "ERROR",
+      reason: "zap amount is outside the configured LNURL bounds",
+    });
     const paymentHash = String(invoice.pr).slice(-64);
     const settlement = await fetch(`${baseUrl}/api/revenue/fake/settle`, {
       method: "POST",

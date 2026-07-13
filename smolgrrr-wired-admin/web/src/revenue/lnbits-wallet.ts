@@ -1,4 +1,9 @@
-import type { RevenueWallet, WalletInvoice, WalletPayment } from "./wallet.js";
+import type {
+  RevenueWallet,
+  WalletInvoice,
+  WalletPayment,
+  WalletPaymentLookup,
+} from "./wallet.js";
 
 type LnbitsWalletOptions = {
   endpoint: string;
@@ -128,34 +133,33 @@ export class LnbitsWallet implements RevenueWallet {
     return feeMsat;
   }
 
-  async lookupPayment(paymentId: string, expectedAmountMsat?: number): Promise<WalletPayment> {
+  async lookupPayment(input: WalletPaymentLookup): Promise<WalletPayment> {
     let value: LnbitsPayment;
-    const byExternalId = await this.#findByExternalId(paymentId, this.#adminKey);
+    const byExternalId = await this.#findByExternalId(input.paymentId, this.#adminKey);
     if (byExternalId) {
       value = byExternalId;
     } else {
-      const response = await this.#fetch(`${this.#endpoint}/api/v1/payments/${encodeURIComponent(paymentId)}`, {
+      const response = await this.#fetch(`${this.#endpoint}/api/v1/payments/${encodeURIComponent(input.paymentId)}`, {
         headers: { Accept: "application/json", "X-Api-Key": this.#adminKey },
         signal: AbortSignal.timeout(15_000),
       });
       if (response.status === 404) {
         return {
-          paymentId,
-          status: "failed",
-          amountMsat: expectedAmountMsat || 0,
-          failureReason: "payment not found",
+          paymentId: input.paymentId,
+          status: "not_found",
+          amountMsat: input.expectedAmountMsat || 0,
         };
       }
       const parsed = await response.json().catch(() => null) as LnbitsPayment | null;
       if (!response.ok || !parsed) throw new Error(`LNbits request failed with HTTP ${response.status}`);
       value = parsed;
     }
-    const amountMsat = this.#paymentAmounts.get(paymentId)
-      ?? expectedAmountMsat
+    const amountMsat = this.#paymentAmounts.get(input.paymentId)
+      ?? input.expectedAmountMsat
       ?? Math.abs(Number(value.amount || 0));
     if (!Number.isSafeInteger(amountMsat) || amountMsat <= 0) throw new Error("LNbits payment amount is missing");
     return {
-      paymentId,
+      paymentId: input.paymentId,
       status: value.paid ? "succeeded" : value.pending ? "pending" : "failed",
       amountMsat,
       feeMsat: Math.abs(Number(value.fee || 0)),

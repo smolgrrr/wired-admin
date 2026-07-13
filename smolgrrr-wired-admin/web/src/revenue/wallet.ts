@@ -8,10 +8,16 @@ export type WalletInvoice = {
 
 export type WalletPayment = {
   paymentId: string;
-  status: "pending" | "succeeded" | "failed" | "unknown";
+  status: "pending" | "succeeded" | "failed" | "unknown" | "not_found";
   amountMsat: number;
   feeMsat?: number;
   failureReason?: string;
+};
+
+export type WalletPaymentLookup = {
+  paymentId: string;
+  expectedAmountMsat?: number;
+  invoice: string;
 };
 
 export interface RevenueWallet {
@@ -28,5 +34,5 @@ export interface RevenueWallet {
     idempotencyKey: string;
     amountMsat: number;
   }): Promise<WalletPayment>;
-  lookupPayment(paymentId: string, expectedAmountMsat?: number): Promise<WalletPayment>;
+  lookupPayment(input: WalletPaymentLookup): Promise<WalletPayment>;
 }

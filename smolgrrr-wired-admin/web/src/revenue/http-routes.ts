@@ -107,6 +107,9 @@ export function registerRevenueRoutes(app: Application, options: RevenueRoutesOp
     try {
       const rawZapRequest = String(req.query.nostr || "");
       const amountMsat = Number(req.query.amount);
+      if (amountMsat < options.minSendableMsat || amountMsat > options.maxSendableMsat) {
+        throw new Error("zap amount is outside the configured LNURL bounds");
+      }
       const result = await service.createZapInvoice({
         eventId: eventIdFromZapRequest(rawZapRequest),
         amountMsat,

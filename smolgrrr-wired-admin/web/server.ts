@@ -30,7 +30,8 @@ import { createFeedSnapshotService } from "./src/feed-snapshot-service.js";
 import { registerHttpRoutes } from "./src/http-routes.js";
 import { createRelayGateway } from "./src/relay-gateway.js";
 import { createHttpAccess } from "./src/http-access.js";
-import { FakeWallet, createWalletFromConfig } from "./src/revenue/fake-wallet.js";
+import { FakeWallet } from "./src/revenue/fake-wallet.js";
+import { createWalletFromConfig } from "./src/revenue/wallet-factory.js";
 import { registerRevenueRoutes } from "./src/revenue/http-routes.js";
 import { RevenueService } from "./src/revenue/service.js";
 import { StagingLightningAddressResolver } from "./src/revenue/lightning-address.js";
@@ -1395,6 +1396,12 @@ if (revenueEnabled) {
     lnbitsInvoiceKey: process.env.REVENUE_LNBITS_INVOICE_KEY || "",
     lnbitsAdminKey: process.env.REVENUE_LNBITS_ADMIN_KEY || "",
     lnbitsWebhookUrl: `${revenuePublicBaseUrl}/api/revenue/wallet/webhook`,
+    blink: {
+      endpoint: process.env.REVENUE_BLINK_ENDPOINT || "https://api.blink.sv/graphql",
+      apiKey: process.env.REVENUE_BLINK_API_KEY || "",
+      walletId: process.env.REVENUE_BLINK_WALLET_ID || "",
+      accountId: process.env.REVENUE_BLINK_ACCOUNT_ID || "",
+    },
   });
   if (wallet instanceof FakeWallet) revenueFakeWallet = wallet;
   revenueService = new RevenueService({
