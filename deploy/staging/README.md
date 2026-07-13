@@ -18,6 +18,16 @@ Create a protected `staging` environment with these secrets:
 - `STAGING_ADMIN_TOKEN`: admin API and cron token for staging
 - `STAGING_WIRED_NOSTR_SECRET_KEY`: staging-only Wired account private key as
   `nsec` or 32-byte hex; do not reuse the production key
+- `STAGING_REVENUE_ENCRYPTION_KEY`: staging-only 32-byte hex key used to encrypt
+  creator payout snapshots
+
+Managed-wallet secrets are optional while staging uses FakeWallet:
+
+- `STAGING_REVENUE_LNBITS_ENDPOINT`: HTTPS base URL of the managed LNbits instance
+- `STAGING_REVENUE_LNBITS_INVOICE_KEY`: invoice/read key for the Wired wallet
+- `STAGING_REVENUE_LNBITS_ADMIN_KEY`: payment-capable admin key for the same wallet
+- `STAGING_REVENUE_ENCRYPTION_PREVIOUS_KEYS`: JSON object of historical key
+  versions to 32-byte hex keys, required only after rotating the current key
 
 Optional environment variables:
 
@@ -33,6 +43,14 @@ Optional environment variables:
 - `STAGING_WIRED_ACCOUNT_MIN_POW`: defaults to `STAGING_RELAY_MIN_POW`, then
   `16`
 - `STAGING_WIRED_ACCOUNT_RELAYS`: optional comma-separated publish relays
+- `STAGING_REVENUE_WALLET_BACKEND`: `fake` by default; set to `lnbits` only after
+  all three LNbits secrets are configured
+- `STAGING_REVENUE_ENCRYPTION_KEY_VERSION`: defaults to `1`; increment on key
+  rotation and retain old keys in `STAGING_REVENUE_ENCRYPTION_PREVIOUS_KEYS`
+- `STAGING_REVENUE_MAX_ROUTING_FEE_MSAT`: defaults to `5000`
+- `STAGING_REVENUE_PAYMENT_NOT_FOUND_GRACE_MS`: defaults to `86400000` (24
+  hours), during which an unindexed outgoing payment remains reserved to prevent
+  a retry from double-paying
 - `STAGING_SMOKE_BASE_URL`: smoke-test base URL, defaults to the local Umbrel app
   URL on `STAGING_PORT`
 - `STAGING_PUBLIC_SMOKE_URLS`: optional public URLs for the deploy helper to
@@ -81,4 +99,18 @@ VITE_POW_RELAYS=wss://staging.wiredsignal.online,wss://powrelay.xyz,wss://pow.re
 VITE_ENRICHMENT_RELAYS=wss://staging.wiredsignal.online,wss://relay.damus.io,wss://offchain.pub,wss://nos.lol,wss://relay.primal.net,wss://relay.nostr.band,wss://nostr.wine,wss://relay.snort.social
 VITE_CONFESS_API_BASE=https://staging.wiredsignal.online
 VITE_WIRED_ACCOUNT_API_BASE=https://staging.wiredsignal.online
+VITE_REVENUE_API_BASE=https://staging.wiredsignal.online
 ```
+
+## Revenue testing and managed-wallet cutover
+
+Staging deploys with FakeWallet. Use it to verify enrollment, NIP-57 invoice
+creation, the exact 70/30 ledger split, receipt publication, the 20-sat payout
+threshold, and deferred payout behavior without spending sats.
+
+For the final real-sat canary, add the three LNbits secrets above, set the
+staging environment variable `STAGING_REVENUE_WALLET_BACKEND=lnbits`, and rerun
+the staging workflow. Start with one low-value zap and confirm the operator
+status endpoint reports no alerts before increasing volume. Switching the
+backend does not alter production and does not require running a Lightning node
+or channels on Wired infrastructure.

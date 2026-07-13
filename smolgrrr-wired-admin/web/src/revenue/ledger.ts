@@ -92,6 +92,8 @@ export type RevenuePayout = {
   feeMsat: number | null;
   reason: string | null;
   nextAttemptAt: number | null;
+  createdAt: number;
+  updatedAt: number;
 };
 
 type PayoutRow = {
@@ -104,6 +106,8 @@ type PayoutRow = {
   fee_msat: number | null;
   reason: string | null;
   next_attempt_at: number | null;
+  created_at: number;
+  updated_at: number;
 };
 
 function requireMsat(value: number): number {
@@ -175,6 +179,15 @@ export class RevenueLedger {
         receipt_published_at INTEGER,
         created_at INTEGER NOT NULL,
         settled_at INTEGER
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS revenue_invoice_intents (
+        zap_request_id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL,
+        amount_msat INTEGER NOT NULL CHECK (amount_msat > 0),
+        description_hash TEXT NOT NULL,
+        lease_expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
       ) STRICT;
 
       CREATE TABLE IF NOT EXISTS revenue_payouts (
@@ -261,8 +274,9 @@ export class RevenueLedger {
         UPDATE revenue_enrollments
         SET state = ?, activated_at = CASE WHEN ? = 'active' THEN ? ELSE activated_at END
         WHERE enrollment_id = ?
+          AND (state = 'pending' OR state = ?)
       `)
-      .run(state, state, Date.now(), enrollmentId);
+      .run(state, state, Date.now(), enrollmentId, state);
     const enrollment = this.enrollmentById(enrollmentId);
     if (!enrollment) throw new Error("revenue enrollment not found");
     return enrollment;
@@ -296,7 +310,62 @@ export class RevenueLedger {
         invoice.receiptPublished ? Date.now() : null,
         Date.now(),
       );
+    this.#database
+      .prepare("DELETE FROM revenue_invoice_intents WHERE zap_request_id = ?")
+      .run(invoice.zapRequestId);
     return invoice;
+  }
+
+  claimInvoiceCreation(input: {
+    zapRequestId: string;
+    eventId: string;
+    amountMsat: number;
+    descriptionHash: string;
+    now?: number;
+    leaseMs?: number;
+  }): boolean {
+    const now = input.now ?? Date.now();
+    const leaseExpiresAt = now + (input.leaseMs ?? 120_000);
+    const inserted = this.#database
+      .prepare(`
+        INSERT OR IGNORE INTO revenue_invoice_intents (
+          zap_request_id, event_id, amount_msat, description_hash, lease_expires_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.zapRequestId,
+        input.eventId,
+        input.amountMsat,
+        input.descriptionHash,
+        leaseExpiresAt,
+        now,
+      );
+    if (inserted.changes === 1) return true;
+    const existing = this.#database
+      .prepare("SELECT * FROM revenue_invoice_intents WHERE zap_request_id = ?")
+      .get(input.zapRequestId) as {
+        event_id: string;
+        amount_msat: number;
+        description_hash: string;
+        lease_expires_at: number;
+      } | undefined;
+    if (!existing) return false;
+    if (
+      existing.event_id !== input.eventId ||
+      Number(existing.amount_msat) !== input.amountMsat ||
+      existing.description_hash !== input.descriptionHash
+    ) {
+      throw new Error("zap request already has a conflicting invoice intent");
+    }
+    if (Number(existing.lease_expires_at) > now) return false;
+    const renewed = this.#database
+      .prepare(`
+        UPDATE revenue_invoice_intents
+        SET lease_expires_at = ?
+        WHERE zap_request_id = ? AND lease_expires_at <= ?
+      `)
+      .run(leaseExpiresAt, input.zapRequestId, now);
+    return renewed.changes === 1;
   }
 
   invoiceForZapRequest(zapRequestId: string): RevenueInvoice | null {
@@ -632,6 +701,35 @@ export class RevenueLedger {
     return rows.map((row) => Number(row.version));
   }
 
+  activeEnrollments(): RevenueEnrollment[] {
+    return (this.#database
+      .prepare("SELECT * FROM revenue_enrollments WHERE state = 'active'")
+      .all() as EnrollmentRow[]).map((row) => this.#mapEnrollment(row));
+  }
+
+  staleUncertainPayoutCount(before: number): number {
+    const row = this.#database
+      .prepare(`
+        SELECT COUNT(*) AS amount_msat FROM revenue_payouts
+        WHERE state IN ('attempting', 'ambiguous') AND updated_at < ?
+      `)
+      .get(before) as SumRow;
+    return Number(row.amount_msat);
+  }
+
+  accountingDivergenceMsat(): number {
+    const gross = this.#database
+      .prepare("SELECT COALESCE(SUM(amount_msat), 0) AS amount_msat FROM revenue_settlements")
+      .get() as SumRow;
+    const fees = this.#database
+      .prepare(`
+        SELECT COALESCE(SUM(fee_msat), 0) AS amount_msat
+        FROM revenue_payouts WHERE state = 'succeeded'
+      `)
+      .get() as SumRow;
+    return Number(gross.amount_msat) - Number(fees.amount_msat) - this.totalLedgerMsat();
+  }
+
   wiredRevenueMsat(): number {
     const row = this.#database
       .prepare("SELECT COALESCE(SUM(wired_delta_msat), 0) AS amount_msat FROM revenue_ledger_entries")
@@ -738,6 +836,8 @@ export class RevenueLedger {
       feeMsat: row.fee_msat === null ? null : Number(row.fee_msat),
       reason: row.reason,
       nextAttemptAt: row.next_attempt_at === null ? null : Number(row.next_attempt_at),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
     };
   }
 }

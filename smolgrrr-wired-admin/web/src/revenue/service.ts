@@ -38,6 +38,7 @@ type RevenueServiceOptions = {
   maxRoutingFeeMsat?: number;
   encryptionKeyVersion?: number;
   historicalEncryptionKeys?: Record<number, Uint8Array>;
+  paymentNotFoundGraceMs?: number;
 };
 
 type PostingPath = RevenueEnrollment["postingPath"];
@@ -94,6 +95,7 @@ export class RevenueService {
   readonly #invoicesEnabled: boolean;
   readonly #payoutsEnabled: boolean;
   readonly #maxRoutingFeeMsat: number;
+  readonly #paymentNotFoundGraceMs: number;
   #invoiceCreationQueue: Promise<unknown> = Promise.resolve();
 
   constructor(options: RevenueServiceOptions) {
@@ -114,6 +116,10 @@ export class RevenueService {
     this.#invoicesEnabled = options.invoicesEnabled ?? true;
     this.#payoutsEnabled = options.payoutsEnabled ?? true;
     this.#maxRoutingFeeMsat = Math.max(0, Math.floor(options.maxRoutingFeeMsat ?? 5_000));
+    this.#paymentNotFoundGraceMs = Math.max(
+      60_000,
+      Math.floor(options.paymentNotFoundGraceMs ?? 86_400_000),
+    );
   }
 
   publicConfig(): {
@@ -143,10 +149,35 @@ export class RevenueService {
     if ((status.payouts.ambiguous || 0) > 0) alerts.push("ambiguous payouts require provider reconciliation");
     if (status.creatorReservedMsat > 0) alerts.push("creator funds are reserved in active payouts");
     if (status.wiredRevenueMsat < 0) alerts.push("Wired fee balance is negative");
+    if (status.creatorAvailableMsat >= 20_000 && status.wiredRevenueMsat < this.#maxRoutingFeeMsat) {
+      alerts.push("Wired fee balance is below the payout routing-fee safety bound");
+    }
+    if (this.#ledger.accountingDivergenceMsat() !== 0) {
+      alerts.push("revenue ledger conservation check failed");
+    }
+    if (this.#ledger.staleUncertainPayoutCount(Date.now() - this.#paymentNotFoundGraceMs) > 0) {
+      alerts.push("stale ambiguous payouts require provider investigation");
+    }
     const unavailableKeyVersions = this.#ledger.enrollmentKeyVersions()
       .filter((version) => !this.#vault.hasKeyVersion(version));
     if (unavailableKeyVersions.length > 0) {
       alerts.push(`missing revenue encryption key versions: ${unavailableKeyVersions.join(", ")}`);
+    }
+    let decryptionFailures = 0;
+    for (const enrollment of this.#ledger.activeEnrollments()) {
+      try {
+        this.#vault.decrypt({
+          keyVersion: enrollment.addressKeyVersion,
+          ciphertext: enrollment.addressCiphertext,
+          iv: enrollment.addressIv,
+          tag: enrollment.addressTag,
+        });
+      } catch {
+        decryptionFailures += 1;
+      }
+    }
+    if (decryptionFailures > 0) {
+      alerts.push(`${decryptionFailures} payout destination snapshots cannot be decrypted`);
     }
     return {
       walletBackend: this.#wallet.backend,
@@ -248,6 +279,20 @@ export class RevenueService {
       }
 
       const descriptionHash = crypto.createHash("sha256").update(input.rawZapRequest, "utf8").digest("hex");
+      const ownsInvoiceIntent = this.#ledger.claimInvoiceCreation({
+        zapRequestId: request.id,
+        eventId: input.eventId,
+        amountMsat: input.amountMsat,
+        descriptionHash,
+      });
+      if (!ownsInvoiceIntent) {
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          const completed = this.#ledger.invoiceForZapRequest(request.id);
+          if (completed) return { paymentHash: completed.paymentHash, invoice: completed.invoice };
+        }
+        throw new Error("invoice creation is already in progress; retry shortly");
+      }
       const walletInvoice = await this.#wallet.createInvoice({
         amountMsat: input.amountMsat,
         descriptionHash,
@@ -373,12 +418,22 @@ export class RevenueService {
             });
             result.completedPayouts += 1;
           } else if (payment.status === "failed") {
-            this.#ledger.releasePayout({
-              payoutId: payout.payoutId,
-              reason: payment.failureReason || "wallet confirmed payment failure",
-              nextAttemptAt: Date.now() + 5 * 60_000,
-            });
-            result.releasedPayouts += 1;
+            const notFound = payment.failureReason === "payment not found";
+            if (notFound && now - payout.createdAt < this.#paymentNotFoundGraceMs) {
+              this.#ledger.markPayoutAmbiguous({
+                payoutId: payout.payoutId,
+                providerPaymentId: payout.providerPaymentId || payout.payoutId,
+                reason: "provider has not indexed the attempted payment yet",
+                nextAttemptAt: now + 60_000,
+              });
+            } else {
+              this.#ledger.releasePayout({
+                payoutId: payout.payoutId,
+                reason: payment.failureReason || "wallet confirmed payment failure",
+                nextAttemptAt: now + 5 * 60_000,
+              });
+              result.releasedPayouts += 1;
+            }
           } else {
             this.#ledger.markPayoutAmbiguous({
               payoutId: payout.payoutId,

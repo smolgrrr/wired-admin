@@ -217,9 +217,16 @@ test("an ambiguous outgoing payment stays reserved until provider reconciliation
       throw new Error("request timed out after dispatch");
     }
 
-    async lookupPayment(paymentId: string) {
+    async lookupPayment(paymentId: string, expectedAmountMsat?: number) {
       const payment = this.payments.get(paymentId);
-      if (!payment) throw new Error("payment not found");
+      if (!payment) {
+        return {
+          paymentId,
+          status: "failed" as const,
+          amountMsat: expectedAmountMsat || 0,
+          failureReason: "payment not found",
+        };
+      }
       return payment;
     }
   }
@@ -288,8 +295,14 @@ test("an ambiguous outgoing payment stays reserved until provider reconciliation
     });
 
     const payout = service.payoutStatusForEvent(event.id);
-    wallet.payments.set(payout.providerPaymentId as string, wallet.payments.values().next().value as WalletPayment);
+    const successfulPayment = wallet.payments.values().next().value as WalletPayment;
+    wallet.payments.clear();
     await service.reconcileAll(Date.now() + 61_000);
+    assert.equal(service.payoutStatusForEvent(event.id).state, "ambiguous");
+    assert.equal(service.balanceForEvent(event.id).reservedMsat, 21_000);
+
+    wallet.payments.set(payout.providerPaymentId as string, successfulPayment);
+    await service.reconcileAll(Date.now() + 122_000);
     assert.equal(service.payoutStatusForEvent(event.id).state, "succeeded");
     assert.deepEqual(service.balanceForEvent(event.id), {
       availableMsat: 0,

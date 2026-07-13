@@ -79,6 +79,17 @@ test("a settled zap is conserved with Wired-favouring 70/30 rounding exactly onc
       amountMsat: 1_000,
       invoice: "payout-invoice",
     });
+    ledger.markPayoutAmbiguous({
+      payoutId: "payout-crash-recovery",
+      providerPaymentId: "provider-payout-id",
+      reason: "response lost",
+      nextAttemptAt: 0,
+    });
+    ledger.deferPayout({
+      payoutKey: "deferred-creator",
+      reason: "destination minimum is higher than balance",
+      nextAttemptAt: 0,
+    });
     const backupFile = path.join(directory, "backups", "revenue.sqlite");
     ledger.backupTo(backupFile);
     const restored = new RevenueLedger(backupFile);
@@ -91,7 +102,8 @@ test("a settled zap is conserved with Wired-favouring 70/30 rounding exactly onc
       assert.equal(restored.totalLedgerMsat(), 10_001);
       assert.equal(restored.enrollmentForEvent("b".repeat(64))?.addressCiphertext, "encrypted-address");
       assert.equal(restored.pendingInvoices()[0]?.invoice, "invoice-backup");
-      assert.equal(restored.duePayouts()[0]?.payoutId, "payout-crash-recovery");
+      assert.ok(restored.duePayouts().some((payout) => payout.payoutId === "payout-crash-recovery"));
+      assert.ok(restored.duePayouts().some((payout) => payout.state === "deferred"));
     } finally {
       restored.close();
     }
@@ -132,6 +144,31 @@ test("an existing unversioned enrollment schema migrates to encryption key versi
     assert.ok(columns.some((column) => column.name === "address_key_version"));
   } finally {
     ledger.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("invoice creation leases are exclusive across processes and recover after expiry", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-intent-"));
+  const databaseFile = path.join(directory, "revenue.sqlite");
+  const first = new RevenueLedger(databaseFile);
+  const second = new RevenueLedger(databaseFile);
+  const input = {
+    zapRequestId: "a".repeat(64),
+    eventId: "b".repeat(64),
+    amountMsat: 10_000,
+    descriptionHash: "c".repeat(64),
+    now: 1_000,
+    leaseMs: 120_000,
+  };
+
+  try {
+    assert.equal(first.claimInvoiceCreation(input), true);
+    assert.equal(second.claimInvoiceCreation(input), false);
+    assert.equal(second.claimInvoiceCreation({ ...input, now: 121_001 }), true);
+  } finally {
+    first.close();
+    second.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

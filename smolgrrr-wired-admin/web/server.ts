@@ -1415,6 +1415,10 @@ if (revenueEnabled) {
     invoicesEnabled: readEnvFlag("REVENUE_ACCEPT_INVOICES", true),
     payoutsEnabled: readEnvFlag("REVENUE_SEND_PAYOUTS", true),
     maxRoutingFeeMsat: Math.max(0, Number(process.env.REVENUE_MAX_ROUTING_FEE_MSAT || 5_000)),
+    paymentNotFoundGraceMs: Math.max(
+      60_000,
+      Number(process.env.REVENUE_PAYMENT_NOT_FOUND_GRACE_MS || 86_400_000),
+    ),
     publishReceipt: (event) =>
       publishNostrEvent(event, wiredAccountRelays, wiredAccountPublishTimeoutMs),
   });
