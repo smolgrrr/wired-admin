@@ -16,13 +16,15 @@ Each entry includes a timestamp, local relay URL, and connection identity. Depen
 - published `EVENT` identity and bytes; and
 - `OK` acceptance or rejection and its reason.
 
-The workflow summary adds connection reuse, request and close counts, returned and published bytes, successful and rejected acknowledgements, repeated-operation retries, relay fan-out, subscription lifetimes, and completion latency.
+The workflow summary adds connection reuse, request and close counts, returned and published bytes, successful and rejected acknowledgements, explicit retries, repeated operations, relay fan-out, subscription lifetimes, and completion latency. Completing a workflow freezes its transcript boundary so later relay activity cannot alter the result.
 
-Repeated requests are counted as retries only when their serialized filters are identical. Repeated publishes are counted by event ID. This is an observable classification, not a claim about caller intent; an audit must still explain why the repeat occurred.
+Repeated requests are counted when their serialized filters are identical. Repeated publishes are counted by event ID. This is an observable classification, not a claim about caller intent or retry policy. A workflow records a retry explicitly at the public workflow boundary, where the caller's intent is known.
 
 ## Driving relay behavior
 
 The fixture callback for a request can return signed events, send EOSE, delay either response, or close the connection. The publish callback can delay and return either `OK true` or `OK false`, or close without acknowledging. Withholding EOSE lets the application's real EOSE timeout run; the transcript then shows a client `CLOSE` with no preceding relay EOSE and the measured lifetime. Withholding `OK` similarly lets the application's acknowledgement timeout or cancellation policy run.
+
+One `RelayTranscriptSession` can aggregate several local relay fixtures. This makes fan-out a count of distinct relay URLs touched by a workflow rather than a value inferred from one fixture.
 
 `waitFor` is the deterministic completion signal for tests. Assertions should wait for protocol behavior—such as the expected number of `CLOSE` messages—instead of sleeping. Small response delays are reserved for scenarios whose behavior specifically depends on ordering or failure.
 

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import type { IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
-import { finalizeEvent, getPublicKey, nip19, Relay, type EventTemplate } from "nostr-tools";
+import { finalizeEvent, getPublicKey, nip19, type EventTemplate } from "nostr-tools";
 import { WebSocketServer, type RawData } from "ws";
 import {
   envFlag as readEnvFlag,
@@ -16,8 +16,6 @@ import {
   readJsonResponse as readHttpJsonResponse,
   summarizeHttpError,
   uniqueRelays,
-  uniqueSorted as uniqueSortedValues,
-  withTimeout as withPromiseTimeout,
 } from "./src/utils.js";
 import { verifyPow as verifyEventPow } from "./src/pow.js";
 import { createXClient } from "./src/x-client.js";
@@ -30,6 +28,7 @@ import { createFeedSnapshotService } from "./src/feed-snapshot-service.js";
 import { registerHttpRoutes } from "./src/http-routes.js";
 import { createRelayGateway } from "./src/relay-gateway.js";
 import { createHttpAccess } from "./src/http-access.js";
+import { publishNostrEvent } from "./src/nostr-publisher.js";
 import { FakeWallet } from "./src/revenue/fake-wallet.js";
 import { createWalletFromConfig } from "./src/revenue/wallet-factory.js";
 import { registerRevenueRoutes } from "./src/revenue/http-routes.js";
@@ -591,34 +590,6 @@ function buildSignedAccountEvent(
 
 function buildConfessionEvent(admissionEvent: NostrEvent, secretKey: Uint8Array): NostrEvent {
   return buildSignedAccountEvent(admissionEvent, secretKey, { trimContent: true });
-}
-
-async function publishNostrEvent(
-  event: NostrEvent,
-  relays: string[],
-  timeoutMs: number,
-): Promise<string[]> {
-  const results = await Promise.allSettled(
-    relays.map(async (url) => {
-      const relay = await withPromiseTimeout(Relay.connect(url), timeoutMs, url);
-      try {
-        await withPromiseTimeout(relay.publish(event), timeoutMs, url);
-        return normalizeRelayUrl(relay.url || url);
-      } finally {
-        try {
-          relay.close();
-        } catch {
-          // Relay already closed.
-        }
-      }
-    }),
-  );
-
-  return uniqueSortedValues(
-    results
-      .filter((result) => result.status === "fulfilled")
-      .map((result) => result.value),
-  );
 }
 
 async function publishConfessionEvent(event: NostrEvent): Promise<string[]> {

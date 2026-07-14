@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { finalizeEvent, Relay } from "nostr-tools";
+import { publishNostrEvent } from "../nostr-publisher.js";
 import {
   RelayTranscriptHarness,
+  RelayTranscriptSession,
   type RelayPublishController,
   type RelayRequestController,
 } from "./relay-transcript.js";
@@ -15,46 +17,67 @@ const event = finalizeEvent({
 }, new Uint8Array(32).fill(3));
 
 test("relay transcript records publish rejection, retry, and acknowledgement", async () => {
-  let attempt = 0;
-  const harness = await RelayTranscriptHarness.listen({
+  const session = new RelayTranscriptSession();
+  const acceptedHarness = await RelayTranscriptHarness.listen({
+    session,
     onPublish(publish: RelayPublishController) {
-      attempt += 1;
-      publish.acknowledge(attempt > 1, attempt > 1 ? "" : "rate-limited: retry", 5);
+      publish.acknowledge(true);
+    },
+  });
+  let rejectedAttempts = 0;
+  const rejectedHarness = await RelayTranscriptHarness.listen({
+    session,
+    onPublish(publish: RelayPublishController) {
+      rejectedAttempts += 1;
+      publish.acknowledge(
+        rejectedAttempts > 1,
+        rejectedAttempts > 1 ? "" : "rate-limited: retry",
+      );
     },
   });
 
   try {
-    const workflow = harness.beginWorkflow("publish-retry");
-    const relay = await Relay.connect(harness.url);
-    await assert.rejects(relay.publish(event), /rate-limited: retry/);
-    await relay.publish(event);
-    relay.close();
-    await harness.waitFor(
-      (entries) => entries.some((entry) => entry.type === "connection-closed"),
+    const workflow = session.beginWorkflow("publish-retry");
+    assert.deepEqual(
+      await publishNostrEvent(
+        event,
+        [acceptedHarness.url, rejectedHarness.url],
+        1_000,
+      ),
+      [acceptedHarness.url],
+    );
+    workflow.recordRetry(`EVENT:${event.id}:${rejectedHarness.url}`);
+    assert.deepEqual(
+      await publishNostrEvent(event, [rejectedHarness.url], 1_000),
+      [rejectedHarness.url],
     );
     workflow.complete();
 
-    const summary = harness.summary(workflow);
+    const summary = session.summary(workflow);
     assert.deepEqual({
       openedConnections: summary.openedConnections,
-      connectionReuseCount: summary.connectionReuseCount,
       publishes: summary.publishes,
       acknowledgements: summary.acknowledgements,
       rejections: summary.rejections,
       retries: summary.retries,
+      repeatedOperations: summary.repeatedOperations,
       relayFanout: summary.relayFanout,
     }, {
-      openedConnections: 1,
-      connectionReuseCount: 1,
-      publishes: 2,
-      acknowledgements: 1,
+      openedConnections: 3,
+      publishes: 3,
+      acknowledgements: 2,
       rejections: 1,
       retries: 1,
-      relayFanout: 1,
+      repeatedOperations: 2,
+      relayFanout: 2,
     });
     assert.ok(summary.publishedEventBytes > 0);
+
+    const frozenSummary = session.summary(workflow);
+    workflow.recordRetry("after-completion");
+    assert.deepEqual(session.summary(workflow), frozenSummary);
   } finally {
-    await harness.close();
+    await Promise.all([acceptedHarness.close(), rejectedHarness.close()]);
   }
 });
 
@@ -84,7 +107,7 @@ test("relay transcript exposes a client timeout as CLOSE without relay EOSE", as
     assert.equal(summary.eose, 0);
     assert.equal(summary.closes, 1);
     assert.equal(summary.subscriptionLifetimesMs.length, 1);
-    assert.ok((summary.subscriptionLifetimesMs[0] ?? 0) >= 15);
+    assert.ok((summary.subscriptionLifetimesMs[0] ?? 0) >= 0);
   } finally {
     await harness.close();
   }

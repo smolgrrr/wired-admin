@@ -13,7 +13,7 @@ import {
 
 const secretKey = new Uint8Array(32).fill(2);
 const rootEvent = finalizeEvent({
-  created_at: Math.floor(Date.now() / 1000),
+  created_at: 2_000_000_000,
   kind: 1,
   tags: [],
   content: "root",
@@ -56,7 +56,9 @@ test("feed snapshot exposes complete output and its relay transcript", async () 
       moderation: createModerationService(path.join(temporaryDirectory, "moderation.json")),
     });
 
+    const refreshStartedAt = Math.floor(Date.now() / 1000) - 24 * 60 * 60;
     const snapshot = await service.refresh();
+    const refreshCompletedAt = Math.floor(Date.now() / 1000) - 24 * 60 * 60;
     await harness.waitFor(
       (entries) => entries.filter((entry) => entry.type === "close").length === 3,
     );
@@ -81,6 +83,7 @@ test("feed snapshot exposes complete output and its relay transcript", async () 
       acknowledgements: summary.acknowledgements,
       rejections: summary.rejections,
       retries: summary.retries,
+      repeatedOperations: summary.repeatedOperations,
       relayFanout: summary.relayFanout,
     }, {
       workflow: "feed-snapshot",
@@ -95,12 +98,61 @@ test("feed snapshot exposes complete output and its relay transcript", async () 
       acknowledgements: 0,
       rejections: 0,
       retries: 0,
+      repeatedOperations: 0,
       relayFanout: 1,
     });
     assert.ok(summary.returnedEventBytes > 0);
     assert.equal(summary.subscriptionLifetimesMs.length, 3);
     assert.ok(summary.subscriptionLifetimesMs.every((value) => value >= 0));
     assert.ok(summary.completionLatencyMs >= 0);
+
+    const entries = harness.entries.slice(
+      workflow.startIndex,
+      workflow.completedIndex,
+    );
+    const requests = entries.filter((entry) => entry.type === "request");
+    const requestSince = requests[0]?.filters[0]?.since;
+    if (requestSince === undefined) {
+      assert.fail("expected the root request to include a since boundary");
+    }
+    assert.ok(requestSince >= refreshStartedAt);
+    assert.ok(requestSince <= refreshCompletedAt);
+    assert.equal(requests[1]?.filters[0]?.since, requestSince);
+    assert.deepEqual(
+      requests.map((request) =>
+        request.filters.map(({ since: _since, ...filter }) => filter),
+      ),
+      [
+        [{ kinds: [1], limit: 500 }],
+        [{ kinds: [1], "#e": [rootEvent.id], limit: 100 }],
+        [{ kinds: [0], authors: [rootEvent.pubkey], limit: 1 }],
+      ],
+    );
+    assert.ok(requests.every((request) => request.bytes > 0));
+    assert.deepEqual(
+      entries
+        .filter((entry) => entry.type === "event-returned")
+        .map((entry) => entry.eventId)
+        .sort(),
+      [replyEvent.id, rootEvent.id].sort(),
+    );
+    const requestedSubscriptionIds = requests
+      .map((request) => request.subscriptionId)
+      .sort();
+    assert.deepEqual(
+      entries
+        .filter((entry) => entry.type === "eose")
+        .map((entry) => entry.subscriptionId)
+        .sort(),
+      requestedSubscriptionIds,
+    );
+    assert.deepEqual(
+      entries
+        .filter((entry) => entry.type === "close")
+        .map((entry) => entry.subscriptionId)
+        .sort(),
+      requestedSubscriptionIds,
+    );
   } finally {
     await harness?.close();
     await rm(temporaryDirectory, { force: true, recursive: true });

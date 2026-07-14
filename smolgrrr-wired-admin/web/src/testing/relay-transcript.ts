@@ -34,7 +34,8 @@ export type RelayTranscriptEntry =
       eventId: string;
       accepted: boolean;
       reason: string;
-    });
+    })
+  | { type: "retry"; at: number; operationId: string };
 
 export type RelayRequestController = {
   connectionId: number;
@@ -53,6 +54,7 @@ export type RelayPublishController = {
 };
 
 type RelayTranscriptHarnessOptions = {
+  session?: RelayTranscriptSession;
   onRequest?: (request: RelayRequestController) => void;
   onPublish?: (publish: RelayPublishController) => void;
 };
@@ -62,7 +64,9 @@ export type RelayWorkflowCapture = {
   startedAt: number;
   startIndex: number;
   completedAt?: number;
+  completedIndex?: number;
   complete: () => void;
+  recordRetry: (operationId: string) => void;
 };
 
 export type RelayTranscriptSummary = {
@@ -80,6 +84,7 @@ export type RelayTranscriptSummary = {
   acknowledgements: number;
   rejections: number;
   retries: number;
+  repeatedOperations: number;
   relayFanout: number;
   subscriptionLifetimesMs: number[];
   completionLatencyMs: number;
@@ -96,46 +101,10 @@ function messageBytes(message: string): number {
   return Buffer.byteLength(message, "utf8");
 }
 
-function schedule(action: () => void, delayMs = 0): void {
-  if (delayMs <= 0) {
-    action();
-    return;
-  }
-  setTimeout(action, delayMs);
-}
-
-export class RelayTranscriptHarness {
-  readonly url: string;
-
+export class RelayTranscriptSession {
   private readonly transcript: RelayTranscriptEntry[] = [];
-  private readonly sockets = new Set<WebSocket>();
   private readonly waiters = new Set<Waiter>();
   private nextConnectionId = 0;
-
-  private constructor(
-    private readonly server: WebSocketServer,
-    private readonly options: RelayTranscriptHarnessOptions,
-    port: number,
-  ) {
-    this.url = `ws://127.0.0.1:${port}`;
-    this.server.on("connection", (socket) => this.accept(socket));
-  }
-
-  static async listen(
-    options: RelayTranscriptHarnessOptions = {},
-  ): Promise<RelayTranscriptHarness> {
-    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
-    await new Promise<void>((resolve, reject) => {
-      server.once("listening", resolve);
-      server.once("error", reject);
-    });
-    const address = server.address();
-    if (!address || typeof address === "string") {
-      server.close();
-      throw new Error("Relay transcript harness did not bind a TCP port");
-    }
-    return new RelayTranscriptHarness(server, options, address.port);
-  }
 
   get entries(): readonly RelayTranscriptEntry[] {
     return this.transcript;
@@ -147,17 +116,25 @@ export class RelayTranscriptHarness {
       startedAt: Date.now(),
       startIndex: this.transcript.length,
       complete: () => {
-        capture.completedAt ??= Date.now();
+        if (capture.completedAt !== undefined) return;
+        capture.completedAt = Date.now();
+        capture.completedIndex = this.transcript.length;
+      },
+      recordRetry: (operationId) => {
+        this.record({ type: "retry", at: Date.now(), operationId });
       },
     };
     return capture;
   }
 
   summary(workflow: RelayWorkflowCapture): RelayTranscriptSummary {
-    const entries = this.transcript.slice(workflow.startIndex);
+    const entries = this.transcript.slice(
+      workflow.startIndex,
+      workflow.completedIndex ?? this.transcript.length,
+    );
     const operationsByConnection = new Map<number, number>();
     const operationSignatures = new Set<string>();
-    let retries = 0;
+    let repeatedOperations = 0;
 
     for (const entry of entries) {
       if (entry.type !== "request" && entry.type !== "publish") continue;
@@ -169,7 +146,7 @@ export class RelayTranscriptHarness {
         entry.type === "request"
           ? `REQ:${JSON.stringify(entry.filters)}`
           : `EVENT:${entry.eventId}`;
-      if (operationSignatures.has(signature)) retries += 1;
+      if (operationSignatures.has(signature)) repeatedOperations += 1;
       operationSignatures.add(signature);
     }
 
@@ -205,7 +182,8 @@ export class RelayTranscriptHarness {
       rejections: entries.filter(
         (entry) => entry.type === "acknowledgement" && !entry.accepted,
       ).length,
-      retries,
+      retries: entries.filter((entry) => entry.type === "retry").length,
+      repeatedOperations,
       relayFanout: relayUrls.size,
       subscriptionLifetimesMs: entries
         .filter((entry) => entry.type === "close")
@@ -233,20 +211,100 @@ export class RelayTranscriptHarness {
     });
   }
 
-  async close(): Promise<void> {
-    for (const socket of this.sockets) socket.terminate();
-    for (const waiter of this.waiters) {
+  record(entry: RelayTranscriptEntry): void {
+    this.transcript.push(entry);
+    for (const waiter of [...this.waiters]) {
+      if (!waiter.predicate(this.transcript)) continue;
       clearTimeout(waiter.timeout);
-      waiter.reject(new Error("Relay transcript harness closed"));
+      this.waiters.delete(waiter);
+      waiter.resolve();
     }
-    this.waiters.clear();
+  }
+
+  allocateConnectionId(): number {
+    this.nextConnectionId += 1;
+    return this.nextConnectionId;
+  }
+}
+
+export class RelayTranscriptHarness {
+  readonly url: string;
+  readonly session: RelayTranscriptSession;
+
+  private readonly sockets = new Set<WebSocket>();
+  private readonly scheduledActions = new Set<ReturnType<typeof setTimeout>>();
+  private closed = false;
+
+  private constructor(
+    private readonly server: WebSocketServer,
+    private readonly options: RelayTranscriptHarnessOptions,
+    port: number,
+  ) {
+    this.url = `ws://127.0.0.1:${port}`;
+    this.session = options.session ?? new RelayTranscriptSession();
+    this.server.on("connection", (socket) => this.accept(socket));
+  }
+
+  static async listen(
+    options: RelayTranscriptHarnessOptions = {},
+  ): Promise<RelayTranscriptHarness> {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      server.close();
+      throw new Error("Relay transcript harness did not bind a TCP port");
+    }
+    return new RelayTranscriptHarness(server, options, address.port);
+  }
+
+  get entries(): readonly RelayTranscriptEntry[] {
+    return this.session.entries;
+  }
+
+  beginWorkflow(name: string): RelayWorkflowCapture {
+    return this.session.beginWorkflow(name);
+  }
+
+  summary(workflow: RelayWorkflowCapture): RelayTranscriptSummary {
+    return this.session.summary(workflow);
+  }
+
+  waitFor(
+    predicate: (entries: readonly RelayTranscriptEntry[]) => boolean,
+    timeoutMs = 2_000,
+  ): Promise<void> {
+    return this.session.waitFor(predicate, timeoutMs);
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    for (const timeout of this.scheduledActions) clearTimeout(timeout);
+    this.scheduledActions.clear();
+    for (const socket of this.sockets) socket.terminate();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
+  private schedule(action: () => void, delayMs = 0): void {
+    if (this.closed) return;
+    if (delayMs <= 0) {
+      action();
+      return;
+    }
+    const timeout = setTimeout(() => {
+      this.scheduledActions.delete(timeout);
+      if (!this.closed) action();
+    }, delayMs);
+    this.scheduledActions.add(timeout);
+  }
+
   private accept(socket: WebSocket): void {
-    const connectionId = ++this.nextConnectionId;
+    const connectionId = this.session.allocateConnectionId();
     this.sockets.add(socket);
-    this.record({
+    this.session.record({
       type: "connection-opened",
       at: Date.now(),
       connectionId,
@@ -259,7 +317,7 @@ export class RelayTranscriptHarness {
     });
     socket.on("close", () => {
       this.sockets.delete(socket);
-      this.record({
+      this.session.record({
         type: "connection-closed",
         at: Date.now(),
         connectionId,
@@ -287,7 +345,7 @@ export class RelayTranscriptHarness {
       const subscriptionId = message[1];
       const filters = message.slice(2) as Filter[];
       requestStartedAt.set(subscriptionId, Date.now());
-      this.record({
+      this.session.record({
         type: "request",
         at: Date.now(),
         connectionId,
@@ -301,10 +359,10 @@ export class RelayTranscriptHarness {
         subscriptionId,
         filters,
         sendEvent: (event, delayMs) =>
-          schedule(() => {
+          this.schedule(() => {
             const outgoing = JSON.stringify(["EVENT", subscriptionId, event]);
             socket.send(outgoing);
-            this.record({
+            this.session.record({
               type: "event-returned",
               at: Date.now(),
               connectionId,
@@ -315,9 +373,9 @@ export class RelayTranscriptHarness {
             });
           }, delayMs),
         sendEose: (delayMs) =>
-          schedule(() => {
+          this.schedule(() => {
             socket.send(JSON.stringify(["EOSE", subscriptionId]));
-            this.record({
+            this.session.record({
               type: "eose",
               at: Date.now(),
               connectionId,
@@ -325,7 +383,7 @@ export class RelayTranscriptHarness {
               subscriptionId,
             });
           }, delayMs),
-        closeConnection: (delayMs) => schedule(() => socket.close(), delayMs),
+        closeConnection: (delayMs) => this.schedule(() => socket.close(), delayMs),
       });
       return;
     }
@@ -333,7 +391,7 @@ export class RelayTranscriptHarness {
     if (message[0] === "CLOSE" && typeof message[1] === "string") {
       const subscriptionId = message[1];
       const now = Date.now();
-      this.record({
+      this.session.record({
         type: "close",
         at: now,
         connectionId,
@@ -347,7 +405,7 @@ export class RelayTranscriptHarness {
 
     if (message[0] === "EVENT" && message[1] && typeof message[1] === "object") {
       const event = message[1] as Event;
-      this.record({
+      this.session.record({
         type: "publish",
         at: Date.now(),
         connectionId,
@@ -359,9 +417,9 @@ export class RelayTranscriptHarness {
         connectionId,
         event,
         acknowledge: (accepted, reason = "", delayMs) =>
-          schedule(() => {
+          this.schedule(() => {
             socket.send(JSON.stringify(["OK", event.id, accepted, reason]));
-            this.record({
+            this.session.record({
               type: "acknowledgement",
               at: Date.now(),
               connectionId,
@@ -371,18 +429,8 @@ export class RelayTranscriptHarness {
               reason,
             });
           }, delayMs),
-        closeConnection: (delayMs) => schedule(() => socket.close(), delayMs),
+        closeConnection: (delayMs) => this.schedule(() => socket.close(), delayMs),
       });
-    }
-  }
-
-  private record(entry: RelayTranscriptEntry): void {
-    this.transcript.push(entry);
-    for (const waiter of [...this.waiters]) {
-      if (!waiter.predicate(this.transcript)) continue;
-      clearTimeout(waiter.timeout);
-      this.waiters.delete(waiter);
-      waiter.resolve();
     }
   }
 }
