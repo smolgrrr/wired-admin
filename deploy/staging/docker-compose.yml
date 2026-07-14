@@ -14,7 +14,7 @@ services:
       REVENUE_ENABLED: ${REVENUE_ENABLED:-true}
       REVENUE_DATABASE_FILE: ${REVENUE_DATABASE_FILE:-/app/data/revenue-blink-canary.sqlite}
       REVENUE_PUBLIC_BASE_URL: ${REVENUE_PUBLIC_BASE_URL:-https://staging.wiredsignal.online}
-      REVENUE_RELAY_URL: ${REVENUE_RELAY_URL:-wss://relay.damus.io}
+      REVENUE_RELAY_URL: ${REVENUE_RELAY_URL:-wss://staging.wiredsignal.online}
       REVENUE_LNURL_USERNAME: ${REVENUE_LNURL_USERNAME:-wired}
       REVENUE_WALLET_BACKEND: ${REVENUE_WALLET_BACKEND:-fake}
       REVENUE_ALLOW_FAKE_WALLET: ${REVENUE_ALLOW_FAKE_WALLET:-true}
@@ -75,6 +75,15 @@ services:
     depends_on:
       - relay
 
+  relay_init:
+    image: ghcr.io/hoytech/strfry@sha256:c52807349888ef8a9f8720f3e51ee81af7e20114bad105915febb78f9c604cb1
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["chown"]
+    command: ["-R", "1000:1000", "/app/strfry-db"]
+    volumes:
+      - ${WIRED_ADMIN_DATA_DIR:-./data}/strfry:/app/strfry-db
+
   relay:
     image: ghcr.io/hoytech/strfry@sha256:c52807349888ef8a9f8720f3e51ee81af7e20114bad105915febb78f9c604cb1
     user: "1000:1000"
@@ -82,6 +91,9 @@ services:
     stop_grace_period: 30s
     working_dir: /etc/strfry
     command: ["relay"]
+    depends_on:
+      relay_init:
+        condition: service_completed_successfully
     volumes:
       - ${WIRED_ADMIN_DATA_DIR:-./data}/strfry:/app/strfry-db
       - ${WIRED_ADMIN_STRFRY_CONF:-./strfry.conf}:/etc/strfry/strfry.conf:ro

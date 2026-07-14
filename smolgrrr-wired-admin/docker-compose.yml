@@ -99,6 +99,16 @@ services:
     depends_on:
       - relay
 
+  relay_init:
+    container_name: smolgrrr-wired-admin_relay_init_1
+    image: ghcr.io/hoytech/strfry@sha256:c52807349888ef8a9f8720f3e51ee81af7e20114bad105915febb78f9c604cb1
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["chown"]
+    command: ["-R", "1000:1000", "/app/strfry-db"]
+    volumes:
+      - ${APP_DATA_DIR}/data/strfry:/app/strfry-db
+
   relay:
     container_name: smolgrrr-wired-admin_relay_1
     image: ghcr.io/hoytech/strfry@sha256:c52807349888ef8a9f8720f3e51ee81af7e20114bad105915febb78f9c604cb1
@@ -107,6 +117,9 @@ services:
     stop_grace_period: 30s
     working_dir: /etc/strfry
     command: ["relay"]
+    depends_on:
+      relay_init:
+        condition: service_completed_successfully
     volumes:
       - ${APP_DATA_DIR}/data/strfry:/app/strfry-db
       - ${APP_DATA_DIR}/strfry.conf:/etc/strfry/strfry.conf:ro

@@ -207,6 +207,92 @@ test("a 21-sat zap immediately pays 14 sats and defers below a destination minim
   }
 });
 
+test("reconciliation pays an eligible balance settled while payouts were disabled", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-disabled-payout-"));
+  const databaseFile = path.join(directory, "revenue.sqlite");
+  const wallet = new FakeWallet();
+  const recipientSecret = generateSecretKey();
+  const recipientPubkey = getPublicKey(recipientSecret);
+  const relayUrl = "wss://staging.wiredsignal.online";
+  const requestedPayouts: Array<{ address: string; amountMsat: number }> = [];
+  const addressResolver = {
+    validate: async (address: string) => ({
+      address,
+      callback: "https://wallet.example/lnurl",
+      minSendableMsat: 1_000,
+      maxSendableMsat: 1_000_000,
+    }),
+    requestInvoice: async (address: string, amountMsat: number) => {
+      requestedPayouts.push({ address, amountMsat });
+      return `fake-invoice:creator:${amountMsat}`;
+    },
+  };
+  const options = {
+    databaseFile,
+    encryptionKey: Buffer.alloc(32, 10),
+    recipientSecretKey: recipientSecret,
+    relayUrl,
+    callbackUrl: "https://staging.wiredsignal.online/api/revenue/zap",
+    wallet,
+    minimumPayoutMsat: 14_000,
+    publishReceipt: async () => [relayUrl],
+    addressResolver,
+  };
+  const disabledService = new RevenueService({ ...options, payoutsEnabled: false });
+
+  try {
+    const event = finalizeEvent({
+      kind: 1,
+      content: "payout after enablement",
+      created_at: 30,
+      tags: [["zap", recipientPubkey, relayUrl]],
+    } satisfies EventTemplate, generateSecretKey());
+    const enrollment = disabledService.enrollEvent({
+      event,
+      address: "creator@example.com",
+      postingPath: "browser",
+    });
+    disabledService.activateEnrollment(enrollment.enrollmentId);
+    const request = finalizeEvent({
+      kind: 9734,
+      content: "",
+      created_at: 31,
+      tags: [
+        ["p", recipientPubkey],
+        ["e", event.id],
+        ["amount", "21000"],
+        ["relays", relayUrl],
+      ],
+    } satisfies EventTemplate, generateSecretKey());
+    const invoice = await disabledService.createZapInvoice({
+      eventId: event.id,
+      amountMsat: 21_000,
+      rawZapRequest: JSON.stringify(request),
+    });
+    await wallet.settleInvoice(invoice.paymentHash);
+    await disabledService.reconcileInvoice(invoice.paymentHash);
+    assert.deepEqual(requestedPayouts, []);
+    disabledService.close();
+
+    const enabledService = new RevenueService({ ...options, payoutsEnabled: true });
+    try {
+      await enabledService.reconcileAll();
+      assert.deepEqual(requestedPayouts, [
+        { address: "creator@example.com", amountMsat: 14_000 },
+      ]);
+      assert.deepEqual(enabledService.balanceForEvent(event.id), {
+        availableMsat: 700,
+        reservedMsat: 0,
+        paidMsat: 14_000,
+      });
+    } finally {
+      enabledService.close();
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("an ambiguous outgoing payment stays reserved until provider reconciliation proves success", async () => {
   class TimeoutAfterPaymentWallet implements RevenueWallet {
     readonly backend = "timeout-wallet";

@@ -124,7 +124,7 @@ jobs:
           WIRED_ADMIN_SET_REVENUE_ENABLED: "true"
           WIRED_ADMIN_SET_REVENUE_DATABASE_FILE: ${{ vars.STAGING_REVENUE_DATABASE_FILE || '/app/data/revenue-blink-canary.sqlite' }}
           WIRED_ADMIN_SET_REVENUE_PUBLIC_BASE_URL: https://staging.wiredsignal.online
-          WIRED_ADMIN_SET_REVENUE_RELAY_URL: wss://relay.damus.io
+          WIRED_ADMIN_SET_REVENUE_RELAY_URL: wss://staging.wiredsignal.online
           WIRED_ADMIN_SET_REVENUE_LNURL_USERNAME: wired
           WIRED_ADMIN_SET_REVENUE_WALLET_BACKEND: ${{ vars.STAGING_REVENUE_WALLET_BACKEND || 'fake' }}
           WIRED_ADMIN_SET_REVENUE_ALLOW_FAKE_WALLET: "true"

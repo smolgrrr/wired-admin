@@ -3,6 +3,7 @@ import {spawn} from "node:child_process";
 import {promises as fs} from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import {pathToFileURL} from "node:url";
 
 const DEFAULT_APP_ID = "smolgrrr-wired-admin";
 const DEFAULT_UMBREL_DIR = "/home/umbrel/umbrel";
@@ -154,6 +155,7 @@ function yamlKeyPattern(key) {
 
 function findChildBlock(lines, parentStart, parentEnd, key) {
   const parentIndent = lineIndent(lines[parentStart]);
+  const expectedChildIndent = parentIndent + 2;
   const pattern = yamlKeyPattern(key);
   for (let i = parentStart + 1; i < parentEnd; i += 1) {
     const line = lines[i];
@@ -161,7 +163,7 @@ function findChildBlock(lines, parentStart, parentEnd, key) {
     const indent = lineIndent(line);
     if (indent <= parentIndent) break;
     const match = line.match(pattern);
-    if (!match || indent !== match[1].length) continue;
+    if (!match || indent !== expectedChildIndent) continue;
     const childIndent = indent;
     let end = parentEnd;
     for (let j = i + 1; j < parentEnd; j += 1) {
@@ -272,11 +274,31 @@ function getComposeTarget(composeText) {
   };
 }
 
-function updateInstalledCompose(composeText, target) {
+function syncServiceBlock(lines, packageLines, serviceName) {
+  const packageServices = findServicesBlock(packageLines);
+  const source = findChildBlock(packageLines, packageServices.start, packageServices.end, serviceName);
+  if (!source) fail(`Could not find services.${serviceName} in package docker-compose.yml.`);
+
+  const replacement = packageLines.slice(source.start, source.end);
+  const installedServices = findServicesBlock(lines);
+  const existing = findChildBlock(lines, installedServices.start, installedServices.end, serviceName);
+  if (existing) {
+    lines.splice(existing.start, existing.end - existing.start, ...replacement);
+    return;
+  }
+  lines.splice(installedServices.end, 0, "", ...replacement);
+}
+
+function updateInstalledCompose(composeText, packageComposeText, target) {
   const newline = composeText.includes("\r\n") ? "\r\n" : "\n";
   const trailingNewline = composeText.endsWith("\n");
   const lines = composeText.split(/\r?\n/);
   if (trailingNewline) lines.pop();
+  const packageLines = packageComposeText.split(/\r?\n/);
+  if (packageComposeText.endsWith("\n")) packageLines.pop();
+
+  syncServiceBlock(lines, packageLines, "relay");
+  syncServiceBlock(lines, packageLines, "relay_init");
 
   const web = findWebServiceBlock(lines);
   const envBlock = findChildBlock(lines, web.start, web.end, "environment");
@@ -530,7 +552,7 @@ async function main() {
   }
 
   const installedCompose = await fs.readFile(installedComposePath, "utf8");
-  const updatedCompose = updateInstalledCompose(installedCompose, target);
+  const updatedCompose = updateInstalledCompose(installedCompose, packageCompose, target);
   const updatedManifest = env.WIRED_ADMIN_MANIFEST_VERSION_OVERRIDE || env.WIRED_ADMIN_RELAY_VERSION_OVERRIDE
     ? updateTopLevelScalar(packageManifest, "version", env.WIRED_ADMIN_MANIFEST_VERSION_OVERRIDE || target.relayVersion, {quote: true})
     : packageManifest;
@@ -545,9 +567,9 @@ async function main() {
 
   if (updatedCompose !== installedCompose) {
     await writeFileAtomic(installedComposePath, updatedCompose);
-    log("Updated installed docker-compose.yml image and RELAY_VERSION.");
+    log("Updated installed docker-compose.yml web configuration and relay services.");
   } else {
-    log("Installed docker-compose.yml already has the target image and RELAY_VERSION.");
+    log("Installed docker-compose.yml already matches the target web and relay configuration.");
   }
 
   await writeFileAtomic(installedManifestPath, updatedManifest);
@@ -561,7 +583,11 @@ async function main() {
   log("Deploy completed.");
 }
 
-main().catch((error) => {
-  console.error(`[wired-admin-deploy] ERROR: ${error.message}`);
-  process.exit(1);
-});
+export {updateInstalledCompose};
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    console.error(`[wired-admin-deploy] ERROR: ${error.message}`);
+    process.exit(1);
+  });
+}

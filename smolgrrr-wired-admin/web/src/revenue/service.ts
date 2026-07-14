@@ -420,7 +420,9 @@ export class RevenueService {
         result.errors += 1;
       }
     }
+    const consideredPayoutKeys = new Set<string>();
     for (const payout of this.#ledger.duePayouts(now)) {
+      consideredPayoutKeys.add(payout.payoutKey);
       try {
         if (payout.state === "attempting" || payout.state === "ambiguous") {
           if (!payout.invoice) throw new Error("reserved payout is missing its payment invoice");
@@ -471,6 +473,24 @@ export class RevenueService {
         }
         const enrollment = this.#ledger.enrollmentForPayoutKey(payout.payoutKey);
         if (enrollment && (await this.#attemptPayout(enrollment))) result.deferredPayouts += 1;
+      } catch {
+        result.errors += 1;
+      }
+    }
+    for (const enrollment of this.#ledger.activeEnrollments()) {
+      if (consideredPayoutKeys.has(enrollment.payoutKey)) continue;
+      consideredPayoutKeys.add(enrollment.payoutKey);
+      const latestPayout = this.#ledger.latestPayout(enrollment.payoutKey);
+      if (
+        latestPayout &&
+        (latestPayout.state === "attempting" ||
+          latestPayout.state === "ambiguous" ||
+          latestPayout.state === "deferred")
+      ) {
+        continue;
+      }
+      try {
+        if (await this.#attemptPayout(enrollment)) result.deferredPayouts += 1;
       } catch {
         result.errors += 1;
       }
