@@ -1530,13 +1530,14 @@ void feedSnapshot.refresh().catch(() => {
   if (!feedSnapshot.current()) console.error(feedSnapshot.lastRefreshError() || "initial refresh failed");
 });
 
-scheduleFeedSnapshotRefresh(
+const feedSnapshotRefreshSchedule = scheduleFeedSnapshotRefresh(
   () => feedSnapshot.refresh(),
   refreshSeconds,
   () => {
     console.error(feedSnapshot.lastRefreshError() || "scheduled refresh failed");
   },
 );
+server.on("close", () => feedSnapshotRefreshSchedule?.close());
 
 if (confessXConfig.enabled) {
   void processPendingConfessXMirrors().catch((error) => {
