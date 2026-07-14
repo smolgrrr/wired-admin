@@ -182,3 +182,7 @@ This is a **measured completeness defect**. THR-S2 asks only for the root and ev
 ## Decision
 
 R-THR-1 is a clear no-UX-tradeoff implementation candidate after its failure-edge tests are red. R-THR-2 is required to restore preview completeness even though it may add relay work. R-THR-3 is correctness-first and needs a prototype because an unproven browser subscription rewrite could increase relay work or miss live replies. R-THR-4 remains measurement work and must not be sold as relay savings yet.
+
+## Post-audit implementation evidence
+
+R-THR-1 was implemented after the audit closed. The unchanged two-relay scenario retained all 3 required IDs, the same 2 REQ/2 CLOSE and relay fan-out, and a separate test proves a connection arriving after the deadline is closed. In the controlled comparison, normal p95 was 34 ms before and 31 ms after; the disconnect scenario completed in 26 ms after instead of 2,506 ms at the deadline. These are fixture comparisons only, not public-relay or production-load estimates. Raw comparison: [`thread-preview-lifecycle-after-2026-07-14`](relay-audit-data/thread-preview-lifecycle-after-2026-07-14.json).
