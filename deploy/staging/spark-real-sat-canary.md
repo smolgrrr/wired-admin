@@ -7,6 +7,7 @@ preserving Wired's existing accounting ledger.
 
 - Store a staging-only Spark mnemonic in `STAGING_REVENUE_SPARK_MNEMONIC`.
 - Set `STAGING_REVENUE_WALLET_BACKEND=spark`, `STAGING_REVENUE_SPARK_NETWORK=MAINNET`,
+  `STAGING_REVENUE_SPARK_ACCOUNT_NUMBER=1`,
   and keep both fee limits at 5 sats.
 - Keep `STAGING_REVENUE_SEND_PAYOUTS=false` for the first deployment.
 - Retain the existing `STAGING_REVENUE_DATABASE_FILE` value so prior creator

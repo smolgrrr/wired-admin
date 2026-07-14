@@ -1402,7 +1402,9 @@ if (revenueEnabled) {
     spark: {
       mnemonic: process.env.REVENUE_SPARK_MNEMONIC || "",
       network: process.env.REVENUE_SPARK_NETWORK || "MAINNET",
-      accountNumber: Number(process.env.REVENUE_SPARK_ACCOUNT_NUMBER || 0),
+      ...(process.env.REVENUE_SPARK_ACCOUNT_NUMBER
+        ? { accountNumber: Number(process.env.REVENUE_SPARK_ACCOUNT_NUMBER) }
+        : {}),
       maxFeeSats: Number(process.env.REVENUE_SPARK_MAX_FEE_SATS || 5),
     },
   });

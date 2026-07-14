@@ -84,7 +84,7 @@ export class SparkWallet implements RevenueWallet {
   constructor(options: SparkWalletOptions) {
     this.#mnemonic = options.mnemonic.trim();
     this.#network = options.network ?? "MAINNET";
-    this.#accountNumber = options.accountNumber ?? 0;
+    this.#accountNumber = options.accountNumber ?? (this.#network === "REGTEST" ? 0 : 1);
     this.#maxFeeSats = options.maxFeeSats ?? 5;
     if (!this.#mnemonic) throw new Error("Spark wallet mnemonic is required");
     if (!Number.isSafeInteger(this.#accountNumber) || this.#accountNumber < 0) {

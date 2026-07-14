@@ -52,7 +52,7 @@ test("Spark can be selected as the managed revenue wallet", () => {
     spark: {
       mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
       network: "MAINNET",
-      accountNumber: 0,
+      accountNumber: 1,
       maxFeeSats: 5,
     },
   });

@@ -29,7 +29,7 @@ Managed-wallet secrets are optional while staging uses FakeWallet. For Spark:
 Spark's non-secret settings are configured as GitHub environment variables:
 
 - `STAGING_REVENUE_SPARK_NETWORK`: defaults to `MAINNET`
-- `STAGING_REVENUE_SPARK_ACCOUNT_NUMBER`: defaults to `0`
+- `STAGING_REVENUE_SPARK_ACCOUNT_NUMBER`: defaults to Spark's mainnet account `1`
 - `STAGING_REVENUE_SPARK_MAX_FEE_SATS`: defaults to `5` and must remain aligned
   with `STAGING_REVENUE_MAX_ROUTING_FEE_MSAT`
 - `STAGING_REVENUE_DATABASE_FILE`: defaults to `/app/data/revenue.sqlite`; retain

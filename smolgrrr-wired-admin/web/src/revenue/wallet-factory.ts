@@ -28,7 +28,7 @@ export function createWalletFromConfig(input: WalletConfig): RevenueWallet {
     return new SparkWallet({
       mnemonic: input.spark?.mnemonic || "",
       network,
-      accountNumber: input.spark?.accountNumber ?? 0,
+      accountNumber: input.spark?.accountNumber ?? (network === "REGTEST" ? 0 : 1),
       maxFeeSats: input.spark?.maxFeeSats ?? 5,
     });
   }
