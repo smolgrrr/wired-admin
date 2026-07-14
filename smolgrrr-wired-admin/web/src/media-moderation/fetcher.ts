@@ -85,8 +85,17 @@ async function defaultTransport({
           Accept: "image/*,video/*;q=0.9,*/*;q=0.1",
           "User-Agent": "Wired-Media-Moderation/1.0",
         },
-        lookup(_hostname, _options, callback) {
-          callback(null, address.address, address.family);
+        family: address.family,
+        lookup(_hostname, options, callback) {
+          if (typeof options === "object" && options.all) {
+            const allCallback = callback as unknown as (
+              error: NodeJS.ErrnoException | null,
+              addresses: Array<{ address: string; family: number }>,
+            ) => void;
+            allCallback(null, [address]);
+            return;
+          }
+          callback(null, address.address, address.family as 4 | 6);
         },
         timeout: timeoutMs,
       },
