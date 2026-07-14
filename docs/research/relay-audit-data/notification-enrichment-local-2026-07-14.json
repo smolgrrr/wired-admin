@@ -1,0 +1,114 @@
+{
+  "runId": "notification-enrichment-local-2026-07-14",
+  "wiredCommit": "23aac41 plus issue-75 transcript scenarios",
+  "wiredAdminCommit": "3172948 plus issue-75 audit",
+  "harnessCommit": "05f234a/5c75cf0 contract",
+  "environment": "local Node.js test runners with loopback WebSocket relay fixtures",
+  "relayCoverage": "injected loopback relay URLs only; no public relay connections",
+  "scenarios": [
+    {
+      "name": "wired-browser-notifications-local-fixture",
+      "samples": 20,
+      "requiredRawResultIds": 3,
+      "rawResultIdsResolved": 3,
+      "displayedKind1ResultIds": 2,
+      "perRun": {
+        "preconnectedRelays": 2,
+        "requests": 4,
+        "closes": 4,
+        "relayEose": 4,
+        "returnedEvents": 8,
+        "uniqueReturnedEventIds": 3,
+        "displayedUniqueEventIds": 2,
+        "repeatedOperations": 2,
+        "relayFanout": 2
+      },
+      "completionLatencyMs": {
+        "p50": 36,
+        "p95": 42,
+        "samples": [48, 42, 40, 36, 36, 37, 35, 37, 37, 37, 36, 37, 35, 36, 35, 35, 36, 36, 36, 35]
+      },
+      "protocolEvidenceSample": {
+        "filterShapes": [
+          "authors kind-[1,7] limit-25",
+          "#p kind-1 limit-50"
+        ],
+        "eachFilterOccurrences": 2,
+        "requestBytes": [121, 114, 121, 114],
+        "returnedEventBytes": [451, 433, 451, 439, 451, 433, 451, 439],
+        "subscriptionLifetimesMs": [23, 30, 34, 34]
+      }
+    },
+    {
+      "name": "wired-browser-notifications-peer-disconnect",
+      "samples": 1,
+      "requiredRawResultIds": 3,
+      "rawResultIdsResolved": 3,
+      "requests": 4,
+      "returnedEvents": 4,
+      "relayEose": 2,
+      "relayFanout": 2
+    },
+    {
+      "name": "wired-browser-profiles-batched-newest-inputs",
+      "samples": 1,
+      "requiredPubkeys": 2,
+      "pubkeysResolved": 2,
+      "newestProfilesSelected": 2,
+      "requests": 2,
+      "closes": 2,
+      "relayEose": 2,
+      "returnedEvents": 4,
+      "relayFanout": 2,
+      "filter": "authors-2 kind-0 limit-2"
+    },
+    {
+      "name": "wired-browser-profile-consumer-overlap",
+      "samples": 1,
+      "sameTaskConsumers": 2,
+      "sameTaskProfileCalls": 1,
+      "laterConsumerBeforeFirstEose": 1,
+      "totalProfileCallsBeforeFirstResult": 2,
+      "queriedPubkeySets": [1, 1]
+    },
+    {
+      "name": "wired-browser-quotes-fallback-hint-missing",
+      "samples": 1,
+      "requiredRefIds": 3,
+      "resolvedRefIds": 2,
+      "completedMissingRefIds": 1,
+      "requests": 7,
+      "closes": 7,
+      "relayEose": 7,
+      "returnedEvents": 3,
+      "repeatedOperations": 4,
+      "relayFanout": 3,
+      "staleHintConnections": 0,
+      "hintedEventDelayMs": 20,
+      "hintedEoseDelayMs": 25
+    },
+    {
+      "name": "wired-browser-quote-preconnected-hint-duplicate",
+      "samples": 1,
+      "requiredRefIds": 1,
+      "resolvedRefIds": 1,
+      "requests": 3,
+      "returnedEvents": 2,
+      "hintRelayRequestsForSameFilter": 2,
+      "relayFanout": 2
+    },
+    {
+      "name": "wired-browser-one-shot-context-reused-from-thread-audit",
+      "source": "thread-local-2026-07-14.json / thread-referenced-context-warm-local-fixture",
+      "samples": 20,
+      "requestsPerRun": 2,
+      "returnedEventsPerRun": 1,
+      "relayFanout": 2,
+      "completionLatencyMs": {
+        "p50": 17,
+        "p95": 19
+      }
+    }
+  ],
+  "interpretation": "Counts and timings describe controlled fixture workflows only. They are not estimates of public relay traffic, cache hit rates, notification volume, or production latency."
+}
