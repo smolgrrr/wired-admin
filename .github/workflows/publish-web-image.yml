@@ -53,7 +53,7 @@ jobs:
     name: Deploy to Umbrel
     runs-on: [self-hosted, umbrel, wired-admin]
     needs: publish
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     timeout-minutes: 10
     environment:
       name: production
@@ -77,14 +77,14 @@ jobs:
       WIRED_ADMIN_SET_REVENUE_WALLET_BACKEND: spark
       WIRED_ADMIN_SET_REVENUE_ENCRYPTION_KEY: ${{ secrets.PRODUCTION_REVENUE_ENCRYPTION_KEY }}
       WIRED_ADMIN_SET_REVENUE_ENCRYPTION_KEY_VERSION: "1"
-      WIRED_ADMIN_SET_REVENUE_ACCEPT_ENROLLMENTS: "true"
-      WIRED_ADMIN_SET_REVENUE_ACCEPT_INVOICES: "true"
-      WIRED_ADMIN_SET_REVENUE_SEND_PAYOUTS: "true"
+      WIRED_ADMIN_SET_REVENUE_ACCEPT_ENROLLMENTS: ${{ vars.PRODUCTION_REVENUE_ACCEPT_ENROLLMENTS || 'false' }}
+      WIRED_ADMIN_SET_REVENUE_ACCEPT_INVOICES: ${{ vars.PRODUCTION_REVENUE_ACCEPT_INVOICES || 'false' }}
+      WIRED_ADMIN_SET_REVENUE_SEND_PAYOUTS: ${{ vars.PRODUCTION_REVENUE_SEND_PAYOUTS || 'false' }}
       WIRED_ADMIN_SET_REVENUE_PUBLISH_PROFILE: "true"
       WIRED_ADMIN_SET_REVENUE_PROFILE_NAME: Wired
       WIRED_ADMIN_SET_REVENUE_PROFILE_DISPLAY_NAME: Wired
       WIRED_ADMIN_SET_REVENUE_PROFILE_ABOUT: high signal posts from the Wired
-      WIRED_ADMIN_SET_REVENUE_PROFILE_WEBSITE: wiredsignal.online
+      WIRED_ADMIN_SET_REVENUE_PROFILE_WEBSITE: https://wiredsignal.online
       WIRED_ADMIN_SET_REVENUE_PROFILE_PICTURE: https://i0.wp.com/drunkenanimeblog.com/wp-content/uploads/2017/07/1473031501_lain.gif
       WIRED_ADMIN_SET_REVENUE_PROFILE_BANNER: https://blossom.primal.net/3ac7195f78512cfa978277bee400af8ad113d625895dbd307a6bb38066243ffd.jpg
       WIRED_ADMIN_SET_REVENUE_MINIMUM_PAYOUT_MSAT: "14000"
@@ -119,4 +119,7 @@ jobs:
           npm ci --prefix smolgrrr-wired-admin/web --omit=dev --ignore-scripts
           export REVENUE_PROFILE_NOT_BEFORE=$(($(date +%s) - 5))
           node scripts/deploy-wired-admin-umbrel.mjs
-          REVENUE_PROFILE_EXPECTED_NAME=Wired node scripts/verify-revenue-profile.mjs https://relay.wiredsignal.online
+          REVENUE_PROFILE_EXPECTED_NAME=Wired \
+          REVENUE_PROFILE_EXPECTED_PUBKEY=3ff4b1b836c7e63ee4acf391270d8660e1b7af56ba9474b92838bb079e75287d \
+          REVENUE_PROFILE_EXPECTED_ENABLED="${{ vars.PRODUCTION_REVENUE_ACCEPT_INVOICES || 'false' }}" \
+          node scripts/verify-revenue-profile.mjs https://relay.wiredsignal.online

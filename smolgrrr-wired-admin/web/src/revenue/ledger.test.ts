@@ -303,6 +303,54 @@ test("a legacy completed payout can sweep its untouched sub-satoshi remainder to
   }
 });
 
+test("a stale failure or ambiguity cannot overwrite a successful payout", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-terminal-success-"));
+  const ledger = new RevenueLedger(path.join(directory, "revenue.sqlite"));
+
+  try {
+    ledger.creditSettledZap({
+      settlementId: "spark:settlement:terminal-success",
+      eventId: "a".repeat(64),
+      payoutKey: "creator-address-snapshot",
+      amountMsat: 21_000,
+    });
+    ledger.reservePayout({
+      payoutId: "spark-payout-terminal-success",
+      payoutKey: "creator-address-snapshot",
+      amountMsat: 14_000,
+      roundingMsat: 700,
+      invoice: "lnbc14creator",
+    });
+    ledger.completePayout({
+      payoutId: "spark-payout-terminal-success",
+      providerPaymentId: "spark-send-terminal-success",
+      feeMsat: 0,
+    });
+
+    assert.equal(ledger.releasePayout({
+      payoutId: "spark-payout-terminal-success",
+      reason: "stale failure",
+      nextAttemptAt: 1,
+    }).state, "succeeded");
+    assert.equal(ledger.markPayoutAmbiguous({
+      payoutId: "spark-payout-terminal-success",
+      providerPaymentId: "stale-provider-id",
+      reason: "stale timeout",
+      nextAttemptAt: 2,
+    }).state, "succeeded");
+    assert.deepEqual(ledger.balanceFor("creator-address-snapshot"), {
+      availableMsat: 0,
+      reservedMsat: 0,
+      paidMsat: 14_000,
+    });
+    assert.equal(ledger.wiredRevenueMsat(), 7_000);
+    assert.equal(ledger.accountingDivergenceMsat(), 0);
+  } finally {
+    ledger.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("invoice creation leases are exclusive across processes and recover after expiry", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-intent-"));
   const databaseFile = path.join(directory, "revenue.sqlite");

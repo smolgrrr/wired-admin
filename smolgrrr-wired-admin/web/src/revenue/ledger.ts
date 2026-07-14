@@ -561,14 +561,17 @@ export class RevenueLedger {
     providerPaymentId: string;
     feeMsat: number;
   }): RevenuePayout {
-    const payout = this.payoutById(input.payoutId);
-    if (!payout) throw new Error("payout not found");
-    if (payout.state === "succeeded") return payout;
-    if (payout.state !== "attempting" && payout.state !== "ambiguous") {
-      throw new Error("payout is not reserved");
-    }
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      const payout = this.payoutById(input.payoutId);
+      if (!payout) throw new Error("payout not found");
+      if (payout.state === "succeeded") {
+        this.#database.exec("COMMIT");
+        return payout;
+      }
+      if (payout.state !== "attempting" && payout.state !== "ambiguous") {
+        throw new Error("payout is not reserved");
+      }
       const now = Date.now();
       const rounding = this.#database
         .prepare(`
@@ -606,14 +609,15 @@ export class RevenueLedger {
             now,
           );
       }
-      this.#database
+      const updated = this.#database
         .prepare(`
           UPDATE revenue_payouts
           SET state = 'succeeded', provider_payment_id = ?, fee_msat = ?, reason = NULL,
               next_attempt_at = NULL, updated_at = ?
-          WHERE payout_id = ?
+          WHERE payout_id = ? AND state IN ('attempting', 'ambiguous')
         `)
         .run(input.providerPaymentId, Math.max(0, Math.floor(input.feeMsat)), now, input.payoutId);
+      if (updated.changes !== 1) throw new Error("payout changed during completion");
       this.#database.exec("COMMIT");
     } catch (error) {
       this.#database.exec("ROLLBACK");
@@ -720,11 +724,17 @@ export class RevenueLedger {
   }
 
   releasePayout(input: { payoutId: string; reason: string; nextAttemptAt: number }): RevenuePayout {
-    const payout = this.payoutById(input.payoutId);
-    if (!payout) throw new Error("payout not found");
-    if (payout.state === "deferred") return payout;
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      const payout = this.payoutById(input.payoutId);
+      if (!payout) throw new Error("payout not found");
+      if (payout.state === "succeeded" || payout.state === "deferred" || payout.state === "resolved") {
+        this.#database.exec("COMMIT");
+        return payout;
+      }
+      if (payout.state !== "attempting" && payout.state !== "ambiguous") {
+        throw new Error("payout is not reserved");
+      }
       const now = Date.now();
       const rounding = this.#database
         .prepare(`
@@ -761,13 +771,14 @@ export class RevenueLedger {
             now,
           );
       }
-      this.#database
+      const updated = this.#database
         .prepare(`
           UPDATE revenue_payouts
           SET state = 'deferred', reason = ?, next_attempt_at = ?, updated_at = ?
-          WHERE payout_id = ?
+          WHERE payout_id = ? AND state IN ('attempting', 'ambiguous')
         `)
         .run(input.reason, input.nextAttemptAt, now, input.payoutId);
+      if (updated.changes !== 1) throw new Error("payout changed during release");
       this.#database.exec("COMMIT");
     } catch (error) {
       this.#database.exec("ROLLBACK");
@@ -798,16 +809,28 @@ export class RevenueLedger {
     reason: string;
     nextAttemptAt: number;
   }): RevenuePayout {
-    this.#database
-      .prepare(`
-        UPDATE revenue_payouts
-        SET state = 'ambiguous', provider_payment_id = ?, reason = ?, next_attempt_at = ?, updated_at = ?
-        WHERE payout_id = ?
-      `)
-      .run(input.providerPaymentId, input.reason, input.nextAttemptAt, Date.now(), input.payoutId);
-    const payout = this.payoutById(input.payoutId);
-    if (!payout) throw new Error("payout not found");
-    return payout;
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const payout = this.payoutById(input.payoutId);
+      if (!payout) throw new Error("payout not found");
+      if (payout.state !== "attempting" && payout.state !== "ambiguous") {
+        this.#database.exec("COMMIT");
+        return payout;
+      }
+      const updated = this.#database
+        .prepare(`
+          UPDATE revenue_payouts
+          SET state = 'ambiguous', provider_payment_id = ?, reason = ?, next_attempt_at = ?, updated_at = ?
+          WHERE payout_id = ? AND state IN ('attempting', 'ambiguous')
+        `)
+        .run(input.providerPaymentId, input.reason, input.nextAttemptAt, Date.now(), input.payoutId);
+      if (updated.changes !== 1) throw new Error("payout changed during ambiguity update");
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.payoutById(input.payoutId) as RevenuePayout;
   }
 
   payoutById(payoutId: string): RevenuePayout | null {

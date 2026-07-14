@@ -8,6 +8,10 @@ const baseUrl = new URL(process.argv[2] || "https://staging.wiredsignal.online")
 const attempts = 12;
 const notBefore = Number(process.env.REVENUE_PROFILE_NOT_BEFORE || 0);
 const expectedName = String(process.env.REVENUE_PROFILE_EXPECTED_NAME || "").trim();
+const expectedPubkey = String(process.env.REVENUE_PROFILE_EXPECTED_PUBKEY || "").trim();
+const expectedEnabled = !/^(0|false|no)$/i.test(
+  String(process.env.REVENUE_PROFILE_EXPECTED_ENABLED || "true").trim(),
+);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -66,8 +70,11 @@ function latestRevenueProfile(relayUrl, pubkey) {
 assert(baseUrl.protocol === "https:", "revenue profile verification requires an HTTPS base URL");
 const configUrl = new URL("/api/revenue/config", baseUrl);
 const config = await readJson(configUrl);
-assert(config.enabled === true, "revenue routing is not enabled");
+assert(config.enabled === expectedEnabled, `revenue routing enabled state is not ${expectedEnabled}`);
 assert(/^[0-9a-f]{64}$/.test(config.recipientPubkey), "revenue recipient pubkey is invalid");
+if (expectedPubkey) {
+  assert(config.recipientPubkey === expectedPubkey, "revenue recipient is not the pinned Wired account");
+}
 assert(/^wss:\/\//.test(config.relayUrl), "revenue metadata relay must use wss://");
 
 const expectedLud16 = `wired@${baseUrl.hostname}`;

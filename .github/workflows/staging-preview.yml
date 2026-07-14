@@ -162,6 +162,8 @@ jobs:
           STAGING_ADMIN_TOKEN: ${{ secrets.STAGING_ADMIN_TOKEN }}
           STAGING_SMOKE_BASE_URL: ${{ vars.STAGING_SMOKE_BASE_URL || '' }}
           REVENUE_PROFILE_EXPECTED_NAME: Wired Staging
+          REVENUE_PROFILE_EXPECTED_PUBKEY: e5302a43908343e77d8cae26563f8550a0be66387a82daae2752e061740be78a
+          REVENUE_PROFILE_EXPECTED_ENABLED: "true"
         run: |
           scripts/staging-smoke-test.sh "${STAGING_SMOKE_BASE_URL:-http://127.0.0.1:${STAGING_PORT}}"
           node scripts/verify-revenue-profile.mjs "${STAGING_BASE_URL}"

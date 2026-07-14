@@ -8,7 +8,7 @@ test("revenue profile metadata preserves the configured identity and uses Wired 
     lnurlUsername: "wired",
     name: "Wired",
     about: "high signal posts from the Wired",
-    website: "wiredsignal.online",
+    website: "https://wiredsignal.online",
     picture: "https://cdn.example/wired.gif",
     banner: "https://cdn.example/wired.jpg",
   }), {
@@ -16,7 +16,7 @@ test("revenue profile metadata preserves the configured identity and uses Wired 
     display_name: "Wired",
     about: "high signal posts from the Wired",
     lud16: "wired@relay.wiredsignal.online",
-    website: "wiredsignal.online",
+    website: "https://wiredsignal.online",
     picture: "https://cdn.example/wired.gif",
     banner: "https://cdn.example/wired.jpg",
   });
