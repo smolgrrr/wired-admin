@@ -143,18 +143,6 @@ export function createMediaModerationService({
         mediaType: job.mediaType,
         url: job.url,
         lookupVerifiedHash(hash) {
-          const override = store.findOverride(job.url, hash);
-          if (override) {
-            return {
-              sha256: hash,
-              perceptualHash: "0000000000000000",
-              signals: [],
-              status: override.decision,
-              reason: override.decision === "allowed"
-                ? "admin_allow_override"
-                : "admin_block_override",
-            };
-          }
           const cached = store.getByHash(hash);
           if (
             !cached ||
