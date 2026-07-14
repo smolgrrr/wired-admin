@@ -33,6 +33,7 @@ import { createHttpAccess } from "./src/http-access.js";
 import { FakeWallet } from "./src/revenue/fake-wallet.js";
 import { createWalletFromConfig } from "./src/revenue/wallet-factory.js";
 import { registerRevenueRoutes } from "./src/revenue/http-routes.js";
+import { buildRevenueProfileMetadata } from "./src/revenue/profile.js";
 import {
   DEFAULT_MINIMUM_PAYOUT_MSAT,
   RevenueService,
@@ -237,7 +238,7 @@ const relayInfo: RelayInfo = {
   software:
     process.env.RELAY_SOFTWARE ||
     "https://github.com/smolgrrr/wired-admin",
-  version: process.env.RELAY_VERSION || "0.2.13",
+  version: process.env.RELAY_VERSION || "0.2.15",
   limitation: {
     auth_required: false,
     payment_required: false,
@@ -1443,15 +1444,19 @@ async function publishRevenueProfile(): Promise<void> {
   if (!revenueService || !readEnvFlag("REVENUE_PUBLISH_PROFILE", false)) return;
   const secretKey = parseWiredAccountSecretKey();
   if (!secretKey) return;
-  const host = new URL(revenuePublicBaseUrl).hostname;
   const event = finalizeEvent({
     kind: 0,
-    content: JSON.stringify({
-      name: "Wired",
-      display_name: "Wired",
-      about: "Proof-of-work posts routed through Wired.",
-      lud16: `${revenueLnurlUsername}@${host}`,
-    }),
+    content: JSON.stringify(buildRevenueProfileMetadata({
+      publicBaseUrl: revenuePublicBaseUrl,
+      lnurlUsername: revenueLnurlUsername,
+      name: process.env.REVENUE_PROFILE_NAME,
+      displayName: process.env.REVENUE_PROFILE_DISPLAY_NAME,
+      about: process.env.REVENUE_PROFILE_ABOUT,
+      website: process.env.REVENUE_PROFILE_WEBSITE,
+      picture: process.env.REVENUE_PROFILE_PICTURE,
+      banner: process.env.REVENUE_PROFILE_BANNER,
+      nip05: process.env.REVENUE_PROFILE_NIP05,
+    })),
     tags: [],
     created_at: Math.floor(Date.now() / 1000),
   }, secretKey);

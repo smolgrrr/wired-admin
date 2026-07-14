@@ -137,6 +137,9 @@ jobs:
           WIRED_ADMIN_SET_REVENUE_ACCEPT_INVOICES: ${{ vars.STAGING_REVENUE_ACCEPT_INVOICES || 'true' }}
           WIRED_ADMIN_SET_REVENUE_SEND_PAYOUTS: ${{ vars.STAGING_REVENUE_SEND_PAYOUTS || 'false' }}
           WIRED_ADMIN_SET_REVENUE_PUBLISH_PROFILE: "true"
+          WIRED_ADMIN_SET_REVENUE_PROFILE_NAME: Wired Staging
+          WIRED_ADMIN_SET_REVENUE_PROFILE_DISPLAY_NAME: Wired Staging
+          WIRED_ADMIN_SET_REVENUE_PROFILE_ABOUT: Proof-of-work posts routed through Wired staging.
           WIRED_ADMIN_SET_REVENUE_MINIMUM_PAYOUT_MSAT: ${{ vars.STAGING_REVENUE_MINIMUM_PAYOUT_MSAT || '14000' }}
           WIRED_ADMIN_SET_REVENUE_MIN_SENDABLE_MSAT: ${{ vars.STAGING_REVENUE_MIN_SENDABLE_MSAT || '1000' }}
           WIRED_ADMIN_SET_REVENUE_MAX_SENDABLE_MSAT: ${{ vars.STAGING_REVENUE_MAX_SENDABLE_MSAT || '21000' }}
@@ -158,6 +161,7 @@ jobs:
         env:
           STAGING_ADMIN_TOKEN: ${{ secrets.STAGING_ADMIN_TOKEN }}
           STAGING_SMOKE_BASE_URL: ${{ vars.STAGING_SMOKE_BASE_URL || '' }}
+          REVENUE_PROFILE_EXPECTED_NAME: Wired Staging
         run: |
           scripts/staging-smoke-test.sh "${STAGING_SMOKE_BASE_URL:-http://127.0.0.1:${STAGING_PORT}}"
           node scripts/verify-revenue-profile.mjs "${STAGING_BASE_URL}"

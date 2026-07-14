@@ -12,7 +12,7 @@ services:
     container_name: smolgrrr-wired-admin_web_1
     # This self-hosted app is intentionally published for the target deployment
     # architecture only; do not block Wired Admin updates on multi-arch image work.
-    image: ghcr.io/smolgrrr/wired-admin-web:0.2.13
+    image: ghcr.io/smolgrrr/wired-admin-web:0.2.15
     restart: on-failure
     stop_grace_period: 30s
     environment:
@@ -44,6 +44,13 @@ services:
       REVENUE_ACCEPT_INVOICES: "false"
       REVENUE_SEND_PAYOUTS: "false"
       REVENUE_PUBLISH_PROFILE: "false"
+      REVENUE_PROFILE_NAME: "Wired"
+      REVENUE_PROFILE_DISPLAY_NAME: "Wired"
+      REVENUE_PROFILE_ABOUT: "Proof-of-work posts routed through Wired."
+      REVENUE_PROFILE_WEBSITE: ""
+      REVENUE_PROFILE_PICTURE: ""
+      REVENUE_PROFILE_BANNER: ""
+      REVENUE_PROFILE_NIP05: ""
       REVENUE_MINIMUM_PAYOUT_MSAT: "14000"
       REVENUE_MIN_SENDABLE_MSAT: "1000"
       REVENUE_MAX_SENDABLE_MSAT: "100000000000"
@@ -93,7 +100,7 @@ services:
       RELAY_ICON: "https://raw.githubusercontent.com/smolgrrr/wired-admin/main/smolgrrr-wired-admin/icon.png"
       RELAY_MIN_POW: "16"
       RELAY_SOFTWARE: "https://github.com/smolgrrr/wired-admin"
-      RELAY_VERSION: "0.2.13"
+      RELAY_VERSION: "0.2.15"
     volumes:
       - ${APP_DATA_DIR}/data/web:/app/data
     depends_on:

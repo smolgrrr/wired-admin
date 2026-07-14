@@ -77,6 +77,7 @@ test("a settled zap is conserved with Wired-favouring 70/30 rounding exactly onc
       payoutId: "payout-crash-recovery",
       payoutKey: "creator-address-snapshot",
       amountMsat: 1_000,
+      roundingMsat: 0,
       invoice: "payout-invoice",
     });
     ledger.markPayoutAmbiguous({
@@ -164,6 +165,7 @@ test("a finalized provider fee can correct an already completed payout without b
       payoutId: "spark-payout-1",
       payoutKey: "creator-address-snapshot",
       amountMsat: 14_000,
+      roundingMsat: 0,
       invoice: "lnbc14creator",
     });
     ledger.completePayout({
@@ -213,6 +215,88 @@ test("a finalized provider fee can correct an already completed payout without b
         wired_delta_msat: -2_000,
       },
     ]);
+  } finally {
+    ledger.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed payout returns its reserved rounding remainder to the creator", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-rounding-release-"));
+  const ledger = new RevenueLedger(path.join(directory, "revenue.sqlite"));
+
+  try {
+    ledger.creditSettledZap({
+      settlementId: "spark:settlement:rounding-release",
+      eventId: "a".repeat(64),
+      payoutKey: "creator-address-snapshot",
+      amountMsat: 21_000,
+    });
+    ledger.reservePayout({
+      payoutId: "spark-payout-rounding-release",
+      payoutKey: "creator-address-snapshot",
+      amountMsat: 14_000,
+      roundingMsat: 700,
+      invoice: "lnbc14creator",
+    });
+    assert.deepEqual(ledger.balanceFor("creator-address-snapshot"), {
+      availableMsat: 0,
+      reservedMsat: 14_700,
+      paidMsat: 0,
+    });
+
+    ledger.releasePayout({
+      payoutId: "spark-payout-rounding-release",
+      reason: "provider proved the Lightning payment failed",
+      nextAttemptAt: 1,
+    });
+
+    assert.deepEqual(ledger.balanceFor("creator-address-snapshot"), {
+      availableMsat: 14_700,
+      reservedMsat: 0,
+      paidMsat: 0,
+    });
+    assert.equal(ledger.wiredRevenueMsat(), 6_300);
+    assert.equal(ledger.accountingDivergenceMsat(), 0);
+  } finally {
+    ledger.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a legacy completed payout can sweep its untouched sub-satoshi remainder to Wired", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-legacy-rounding-"));
+  const ledger = new RevenueLedger(path.join(directory, "revenue.sqlite"));
+
+  try {
+    ledger.creditSettledZap({
+      settlementId: "spark:settlement:legacy-rounding",
+      eventId: "a".repeat(64),
+      payoutKey: "creator-address-snapshot",
+      amountMsat: 21_000,
+    });
+    ledger.reservePayout({
+      payoutId: "spark-payout-legacy-rounding",
+      payoutKey: "creator-address-snapshot",
+      amountMsat: 14_000,
+      roundingMsat: 0,
+      invoice: "lnbc14creator",
+    });
+    ledger.completePayout({
+      payoutId: "spark-payout-legacy-rounding",
+      providerPaymentId: "spark-send-legacy-rounding",
+      feeMsat: 0,
+    });
+
+    assert.equal(ledger.sweepLegacySucceededPayoutRemainder("spark-payout-legacy-rounding"), 700);
+    assert.equal(ledger.sweepLegacySucceededPayoutRemainder("spark-payout-legacy-rounding"), 0);
+    assert.deepEqual(ledger.balanceFor("creator-address-snapshot"), {
+      availableMsat: 0,
+      reservedMsat: 0,
+      paidMsat: 14_000,
+    });
+    assert.equal(ledger.wiredRevenueMsat(), 7_000);
+    assert.equal(ledger.accountingDivergenceMsat(), 0);
   } finally {
     ledger.close();
     await rm(directory, { recursive: true, force: true });

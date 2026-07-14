@@ -121,7 +121,7 @@ test("an enrolled event receives one settled NIP-57 zap and one public receipt",
   }
 });
 
-test("a 21-sat zap immediately pays 14 sats and defers below a destination minimum", async () => {
+test("a 21-sat zap immediately pays 14 sats and rounds the remainder to Wired", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-payout-"));
   const wallet = new FakeWallet();
   const recipientSecret = generateSecretKey();
@@ -187,10 +187,11 @@ test("a 21-sat zap immediately pays 14 sats and defers below a destination minim
     const paidEvent = await settleZap("paid@example.com", 21_000, 1);
     assert.deepEqual(requestedPayouts, [{ address: "paid@example.com", amountMsat: 14_000 }]);
     assert.deepEqual(service.balanceForEvent(paidEvent.id), {
-      availableMsat: 700,
+      availableMsat: 0,
       reservedMsat: 0,
       paidMsat: 14_000,
     });
+    assert.equal(service.operatorStatus().wiredRevenueMsat, 7_000);
 
     destinationMinimumMsat = 15_000;
     const deferredEvent = await settleZap("deferred@example.com", 21_000, 2);
@@ -281,10 +282,11 @@ test("reconciliation pays an eligible balance settled while payouts were disable
         { address: "creator@example.com", amountMsat: 14_000 },
       ]);
       assert.deepEqual(enabledService.balanceForEvent(event.id), {
-        availableMsat: 700,
+        availableMsat: 0,
         reservedMsat: 0,
         paidMsat: 14_000,
       });
+      assert.equal(enabledService.operatorStatus().wiredRevenueMsat, 7_000);
     } finally {
       enabledService.close();
     }

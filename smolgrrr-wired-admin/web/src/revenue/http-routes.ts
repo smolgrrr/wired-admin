@@ -196,6 +196,20 @@ export function registerRevenueRoutes(app: Application, options: RevenueRoutesOp
     }
   });
 
+  app.post("/api/revenue/operator/payouts/:payoutId/sweep-legacy-remainder", (req: Request, res: Response) => {
+    if (!options.isAdminAuthorized(req)) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    try {
+      const payoutId = String(req.params.payoutId || "");
+      const sweptMsat = service.sweepLegacySucceededPayoutRemainder(payoutId);
+      res.json({ ok: true, payoutId, sweptMsat });
+    } catch (error) {
+      res.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
   app.post("/api/revenue/operator/backup", (req: Request, res: Response) => {
     if (!options.isAdminAuthorized(req)) {
       res.status(401).json({ error: "unauthorized" });

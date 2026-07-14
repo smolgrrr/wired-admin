@@ -528,6 +528,10 @@ export class RevenueService {
     });
   }
 
+  sweepLegacySucceededPayoutRemainder(payoutId: string): number {
+    return this.#ledger.sweepLegacySucceededPayoutRemainder(payoutId);
+  }
+
   backupTo(directory: string): { filename: string } {
     const filename = path.join(directory, `revenue-${new Date().toISOString().replaceAll(":", "-")}.sqlite`);
     this.#ledger.backupTo(filename);
@@ -572,9 +576,9 @@ export class RevenueService {
         nextAttemptAt: Date.now() + 5 * 60_000,
       });
     }
-    const amountMsat = Math.floor(
-      Math.min(balance.availableMsat, metadata.maxSendableMsat) / 1_000,
-    ) * 1_000;
+    const payoutBasisMsat = Math.min(balance.availableMsat, metadata.maxSendableMsat);
+    const amountMsat = Math.floor(payoutBasisMsat / 1_000) * 1_000;
+    const roundingMsat = payoutBasisMsat - amountMsat;
     if (amountMsat < metadata.minSendableMsat) {
       return this.#ledger.deferPayout({
         payoutKey: enrollment.payoutKey,
@@ -617,6 +621,7 @@ export class RevenueService {
       payoutId,
       payoutKey: enrollment.payoutKey,
       amountMsat,
+      roundingMsat,
       invoice,
     });
     this.#ledger.resolveDeferredPayouts(enrollment.payoutKey);

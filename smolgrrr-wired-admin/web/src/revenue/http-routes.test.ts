@@ -160,6 +160,13 @@ test("public HTTP contract completes the FakeWallet NIP-57 revenue transaction",
     assert.equal(missingFeeReconciliation.status, 400);
     assert.deepEqual(await responseJson(missingFeeReconciliation), { error: "payout not found" });
 
+    const missingLegacyRemainderSweep = await fetch(
+      `${baseUrl}/api/revenue/operator/payouts/missing/sweep-legacy-remainder`,
+      { method: "POST" },
+    );
+    assert.equal(missingLegacyRemainderSweep.status, 400);
+    assert.deepEqual(await responseJson(missingLegacyRemainderSweep), { error: "payout not found" });
+
     adminAuthorized = false;
     const unauthorizedFeeReconciliation = await fetch(
       `${baseUrl}/api/revenue/operator/payouts/missing/reconcile-fee`,

@@ -35,7 +35,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}-web
           tags: |
-            type=raw,value=0.2.13
+            type=raw,value=0.2.15
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=sha
@@ -55,6 +55,9 @@ jobs:
     needs: publish
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     timeout-minutes: 10
+    environment:
+      name: production
+      url: https://relay.wiredsignal.online
     permissions:
       contents: read
     env:
@@ -62,6 +65,37 @@ jobs:
       UMBREL_DEPLOY_REPO_DIR: ${{ vars.UMBREL_DEPLOY_REPO_DIR }}
       UMBREL_DEPLOY_PUBLIC_BASE_URL: ${{ vars.UMBREL_DEPLOY_PUBLIC_BASE_URL }}
       UMBREL_DEPLOY_PUBLIC_SMOKE_URLS: ${{ vars.UMBREL_DEPLOY_PUBLIC_SMOKE_URLS }}
+      WIRED_ADMIN_SET_MODERATION_ADMIN_OPEN: "false"
+      WIRED_ADMIN_SET_MODERATION_ADMIN_TOKEN: ${{ secrets.PRODUCTION_ADMIN_TOKEN }}
+      WIRED_ADMIN_SET_CRON_SECRET: ${{ secrets.PRODUCTION_ADMIN_TOKEN }}
+      WIRED_ADMIN_SET_WIRED_NOSTR_SECRET_KEY: ${{ secrets.PRODUCTION_WIRED_NOSTR_SECRET_KEY }}
+      WIRED_ADMIN_SET_REVENUE_ENABLED: "true"
+      WIRED_ADMIN_SET_REVENUE_DATABASE_FILE: /app/data/revenue.sqlite
+      WIRED_ADMIN_SET_REVENUE_PUBLIC_BASE_URL: https://relay.wiredsignal.online
+      WIRED_ADMIN_SET_REVENUE_RELAY_URL: wss://relay.wiredsignal.online
+      WIRED_ADMIN_SET_REVENUE_LNURL_USERNAME: wired
+      WIRED_ADMIN_SET_REVENUE_WALLET_BACKEND: spark
+      WIRED_ADMIN_SET_REVENUE_ENCRYPTION_KEY: ${{ secrets.PRODUCTION_REVENUE_ENCRYPTION_KEY }}
+      WIRED_ADMIN_SET_REVENUE_ENCRYPTION_KEY_VERSION: "1"
+      WIRED_ADMIN_SET_REVENUE_ACCEPT_ENROLLMENTS: "true"
+      WIRED_ADMIN_SET_REVENUE_ACCEPT_INVOICES: "true"
+      WIRED_ADMIN_SET_REVENUE_SEND_PAYOUTS: "true"
+      WIRED_ADMIN_SET_REVENUE_PUBLISH_PROFILE: "true"
+      WIRED_ADMIN_SET_REVENUE_PROFILE_NAME: Wired
+      WIRED_ADMIN_SET_REVENUE_PROFILE_DISPLAY_NAME: Wired
+      WIRED_ADMIN_SET_REVENUE_PROFILE_ABOUT: high signal posts from the Wired
+      WIRED_ADMIN_SET_REVENUE_PROFILE_WEBSITE: wiredsignal.online
+      WIRED_ADMIN_SET_REVENUE_PROFILE_PICTURE: https://i0.wp.com/drunkenanimeblog.com/wp-content/uploads/2017/07/1473031501_lain.gif
+      WIRED_ADMIN_SET_REVENUE_PROFILE_BANNER: https://blossom.primal.net/3ac7195f78512cfa978277bee400af8ad113d625895dbd307a6bb38066243ffd.jpg
+      WIRED_ADMIN_SET_REVENUE_MINIMUM_PAYOUT_MSAT: "14000"
+      WIRED_ADMIN_SET_REVENUE_MIN_SENDABLE_MSAT: "1000"
+      WIRED_ADMIN_SET_REVENUE_MAX_SENDABLE_MSAT: ${{ vars.PRODUCTION_REVENUE_MAX_SENDABLE_MSAT || '10000000' }}
+      WIRED_ADMIN_SET_REVENUE_MAX_ROUTING_FEE_MSAT: "5000"
+      WIRED_ADMIN_SET_REVENUE_PAYMENT_NOT_FOUND_GRACE_MS: "86400000"
+      WIRED_ADMIN_SET_REVENUE_SPARK_MNEMONIC: ${{ secrets.PRODUCTION_REVENUE_SPARK_MNEMONIC }}
+      WIRED_ADMIN_SET_REVENUE_SPARK_NETWORK: MAINNET
+      WIRED_ADMIN_SET_REVENUE_SPARK_ACCOUNT_NUMBER: "1"
+      WIRED_ADMIN_SET_REVENUE_SPARK_MAX_FEE_SATS: "5"
     steps:
       - name: Deploy from Umbrel host
         shell: bash
@@ -82,4 +116,7 @@ jobs:
           git fetch origin main --prune
           git checkout main
           git pull --ff-only origin main
+          npm ci --prefix smolgrrr-wired-admin/web --omit=dev --ignore-scripts
+          export REVENUE_PROFILE_NOT_BEFORE=$(($(date +%s) - 5))
           node scripts/deploy-wired-admin-umbrel.mjs
+          REVENUE_PROFILE_EXPECTED_NAME=Wired node scripts/verify-revenue-profile.mjs https://relay.wiredsignal.online

@@ -503,13 +503,19 @@ export class RevenueLedger {
     payoutId: string;
     payoutKey: string;
     amountMsat: number;
+    roundingMsat: number;
     invoice: string;
   }): RevenuePayout {
     const amountMsat = requireMsat(input.amountMsat);
+    if (!Number.isSafeInteger(input.roundingMsat) || input.roundingMsat < 0 || input.roundingMsat >= 1_000) {
+      throw new Error("payout rounding must be a sub-satoshi integer millisatoshi value");
+    }
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       const balance = this.balanceFor(input.payoutKey);
-      if (balance.availableMsat < amountMsat) throw new Error("creator balance is no longer available");
+      if (balance.availableMsat < amountMsat + input.roundingMsat) {
+        throw new Error("creator balance is no longer available");
+      }
       const now = Date.now();
       this.#database
         .prepare(`
@@ -525,6 +531,21 @@ export class RevenueLedger {
           ) VALUES (?, ?, 'payout_reserve', ?, ?, ?)
         `)
         .run(`payout:${input.payoutId}:reserve`, input.payoutKey, -amountMsat, amountMsat, now);
+      if (input.roundingMsat > 0) {
+        this.#database
+          .prepare(`
+            INSERT INTO revenue_ledger_entries (
+              unique_key, payout_key, entry_type, available_delta_msat, reserved_delta_msat, created_at
+            ) VALUES (?, ?, 'payout_rounding_reserve', ?, ?, ?)
+          `)
+          .run(
+            `payout:${input.payoutId}:rounding-reserve`,
+            input.payoutKey,
+            -input.roundingMsat,
+            input.roundingMsat,
+            now,
+          );
+      }
       this.#database.exec("COMMIT");
     } catch (error) {
       this.#database.exec("ROLLBACK");
@@ -549,6 +570,13 @@ export class RevenueLedger {
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       const now = Date.now();
+      const rounding = this.#database
+        .prepare(`
+          SELECT COALESCE(reserved_delta_msat, 0) AS amount_msat
+          FROM revenue_ledger_entries WHERE unique_key = ?
+        `)
+        .get(`payout:${input.payoutId}:rounding-reserve`) as SumRow | undefined;
+      const roundingMsat = Number(rounding?.amount_msat || 0);
       this.#database
         .prepare(`
           INSERT OR IGNORE INTO revenue_ledger_entries (
@@ -563,6 +591,21 @@ export class RevenueLedger {
           -Math.max(0, Math.floor(input.feeMsat)),
           now,
         );
+      if (roundingMsat > 0) {
+        this.#database
+          .prepare(`
+            INSERT OR IGNORE INTO revenue_ledger_entries (
+              unique_key, payout_key, entry_type, reserved_delta_msat, wired_delta_msat, created_at
+            ) VALUES (?, ?, 'payout_rounding_complete', ?, ?, ?)
+          `)
+          .run(
+            `payout:${input.payoutId}:rounding-complete`,
+            payout.payoutKey,
+            -roundingMsat,
+            roundingMsat,
+            now,
+          );
+      }
       this.#database
         .prepare(`
           UPDATE revenue_payouts
@@ -630,6 +673,52 @@ export class RevenueLedger {
     return this.payoutById(input.payoutId) as RevenuePayout;
   }
 
+  sweepLegacySucceededPayoutRemainder(payoutId: string): number {
+    const uniqueKey = `payout:${payoutId}:legacy-rounding-complete`;
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      if (this.#database.prepare("SELECT 1 FROM revenue_ledger_entries WHERE unique_key = ?").get(uniqueKey)) {
+        this.#database.exec("COMMIT");
+        return 0;
+      }
+      const payout = this.payoutById(payoutId);
+      if (!payout) throw new Error("payout not found");
+      if (payout.state !== "succeeded") throw new Error("payout has not succeeded");
+      const completed = this.#database
+        .prepare("SELECT id FROM revenue_ledger_entries WHERE unique_key = ? AND entry_type = 'payout_complete'")
+        .get(`payout:${payoutId}:complete`) as { id: number } | undefined;
+      if (!completed) throw new Error("completed payout ledger entry is missing");
+      const laterCredit = this.#database
+        .prepare(`
+          SELECT 1 FROM revenue_ledger_entries
+          WHERE payout_key = ? AND entry_type = 'creator_credit' AND id > ? LIMIT 1
+        `)
+        .get(payout.payoutKey, completed.id);
+      if (laterCredit) throw new Error("creator balance changed after this payout completed");
+      const balance = this.balanceFor(payout.payoutKey);
+      if (balance.reservedMsat !== 0) throw new Error("creator balance is reserved by another payout");
+      if (balance.availableMsat === 0) {
+        this.#database.exec("COMMIT");
+        return 0;
+      }
+      if (balance.availableMsat < 0 || balance.availableMsat >= 1_000) {
+        throw new Error("creator balance is not an untouched sub-satoshi remainder");
+      }
+      this.#database
+        .prepare(`
+          INSERT INTO revenue_ledger_entries (
+            unique_key, payout_key, entry_type, available_delta_msat, wired_delta_msat, created_at
+          ) VALUES (?, ?, 'payout_legacy_rounding_complete', ?, ?, ?)
+        `)
+        .run(uniqueKey, payout.payoutKey, -balance.availableMsat, balance.availableMsat, Date.now());
+      this.#database.exec("COMMIT");
+      return balance.availableMsat;
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   releasePayout(input: { payoutId: string; reason: string; nextAttemptAt: number }): RevenuePayout {
     const payout = this.payoutById(input.payoutId);
     if (!payout) throw new Error("payout not found");
@@ -637,6 +726,13 @@ export class RevenueLedger {
     this.#database.exec("BEGIN IMMEDIATE");
     try {
       const now = Date.now();
+      const rounding = this.#database
+        .prepare(`
+          SELECT COALESCE(reserved_delta_msat, 0) AS amount_msat
+          FROM revenue_ledger_entries WHERE unique_key = ?
+        `)
+        .get(`payout:${input.payoutId}:rounding-reserve`) as SumRow | undefined;
+      const roundingMsat = Number(rounding?.amount_msat || 0);
       this.#database
         .prepare(`
           INSERT OR IGNORE INTO revenue_ledger_entries (
@@ -650,6 +746,21 @@ export class RevenueLedger {
           -payout.amountMsat,
           now,
         );
+      if (roundingMsat > 0) {
+        this.#database
+          .prepare(`
+            INSERT OR IGNORE INTO revenue_ledger_entries (
+              unique_key, payout_key, entry_type, available_delta_msat, reserved_delta_msat, created_at
+            ) VALUES (?, ?, 'payout_rounding_release', ?, ?, ?)
+          `)
+          .run(
+            `payout:${input.payoutId}:rounding-release`,
+            payout.payoutKey,
+            roundingMsat,
+            -roundingMsat,
+            now,
+          );
+      }
       this.#database
         .prepare(`
           UPDATE revenue_payouts

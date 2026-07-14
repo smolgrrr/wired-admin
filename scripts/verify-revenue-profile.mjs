@@ -7,6 +7,7 @@ import {verifyEvent} from "../smolgrrr-wired-admin/web/node_modules/nostr-tools/
 const baseUrl = new URL(process.argv[2] || "https://staging.wiredsignal.online");
 const attempts = 12;
 const notBefore = Number(process.env.REVENUE_PROFILE_NOT_BEFORE || 0);
+const expectedName = String(process.env.REVENUE_PROFILE_EXPECTED_NAME || "").trim();
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -88,6 +89,10 @@ for (let attempt = 1; attempt <= attempts; attempt += 1) {
     assert(profile.created_at >= notBefore, "kind-0 predates this deployment");
     const metadata = JSON.parse(profile.content);
     assert(metadata.lud16 === expectedLud16, `kind-0 lud16 is not ${expectedLud16}`);
+    if (expectedName) {
+      assert(metadata.name === expectedName, `kind-0 name is not ${expectedName}`);
+      assert(metadata.display_name === expectedName, `kind-0 display_name is not ${expectedName}`);
+    }
     console.log(`verified ${expectedLud16} for ${config.recipientPubkey} on ${config.relayUrl}`);
     process.exit(0);
   } catch (error) {
