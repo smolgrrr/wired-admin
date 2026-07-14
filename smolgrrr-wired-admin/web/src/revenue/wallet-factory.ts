@@ -1,6 +1,6 @@
-import { BlinkWallet } from "./blink-wallet.js";
 import { FakeWallet } from "./fake-wallet.js";
 import { LnbitsWallet } from "./lnbits-wallet.js";
+import { SparkWallet } from "./spark-wallet.js";
 import type { RevenueWallet } from "./wallet.js";
 
 type WalletConfig = {
@@ -11,21 +11,25 @@ type WalletConfig = {
   lnbitsInvoiceKey?: string;
   lnbitsAdminKey?: string;
   lnbitsWebhookUrl?: string;
-  blink?: {
-    endpoint?: string;
-    apiKey?: string;
-    walletId?: string;
-    accountId?: string;
+  spark?: {
+    mnemonic?: string;
+    network?: string;
+    accountNumber?: number;
+    maxFeeSats?: number;
   };
 };
 
 export function createWalletFromConfig(input: WalletConfig): RevenueWallet {
-  if (input.backend === "blink") {
-    return new BlinkWallet({
-      endpoint: input.blink?.endpoint || "https://api.blink.sv/graphql",
-      apiKey: input.blink?.apiKey || "",
-      walletId: input.blink?.walletId || "",
-      ...(input.blink?.accountId ? { accountId: input.blink.accountId } : {}),
+  if (input.backend === "spark") {
+    const network = String(input.spark?.network || "MAINNET").trim().toUpperCase();
+    if (network !== "MAINNET" && network !== "REGTEST" && network !== "SIGNET" && network !== "TESTNET") {
+      throw new Error(`unsupported Spark network: ${network}`);
+    }
+    return new SparkWallet({
+      mnemonic: input.spark?.mnemonic || "",
+      network,
+      accountNumber: input.spark?.accountNumber ?? 0,
+      maxFeeSats: input.spark?.maxFeeSats ?? 5,
     });
   }
   if (input.backend === "lnbits") {

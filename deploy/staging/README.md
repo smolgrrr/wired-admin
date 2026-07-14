@@ -21,20 +21,19 @@ Create a protected `staging` environment with these secrets:
 - `STAGING_REVENUE_ENCRYPTION_KEY`: staging-only 32-byte hex key used to encrypt
   creator payout snapshots
 
-Managed-wallet secrets are optional while staging uses FakeWallet. For Blink:
+Managed-wallet secrets are optional while staging uses FakeWallet. For Spark:
 
-- `STAGING_REVENUE_BLINK_API_KEY`: server-side Blink API key with Read, Receive,
-  and Write scopes
+- `STAGING_REVENUE_SPARK_MNEMONIC`: staging-only BIP-39 mnemonic controlling
+  the Spark wallet; store it only as a protected GitHub environment secret
 
-Blink's non-secret settings are configured as GitHub environment variables:
+Spark's non-secret settings are configured as GitHub environment variables:
 
-- `STAGING_REVENUE_BLINK_ENDPOINT`: defaults to `https://api.blink.sv/graphql`
-- `STAGING_REVENUE_BLINK_WALLET_ID`: BTC wallet that receives zaps and funds payouts
-- `STAGING_REVENUE_BLINK_ACCOUNT_ID`: expected account ID used to reject a key
-  connected to the wrong account
-- `STAGING_REVENUE_DATABASE_FILE`: defaults to the isolated canary ledger at
-  `/app/data/revenue-blink-canary.sqlite`; do not point the Blink canary at the
-  historical FakeWallet ledger
+- `STAGING_REVENUE_SPARK_NETWORK`: defaults to `MAINNET`
+- `STAGING_REVENUE_SPARK_ACCOUNT_NUMBER`: defaults to `0`
+- `STAGING_REVENUE_SPARK_MAX_FEE_SATS`: defaults to `5` and must remain aligned
+  with `STAGING_REVENUE_MAX_ROUTING_FEE_MSAT`
+- `STAGING_REVENUE_DATABASE_FILE`: defaults to `/app/data/revenue.sqlite`; retain
+  the existing configured path when migrating so settled accounting is preserved
 
 The older LNbits adapter uses these secrets:
 
@@ -58,9 +57,8 @@ Optional environment variables:
 - `STAGING_WIRED_ACCOUNT_MIN_POW`: defaults to `STAGING_RELAY_MIN_POW`, then
   `16`
 - `STAGING_WIRED_ACCOUNT_RELAYS`: optional comma-separated publish relays
-- `STAGING_REVENUE_WALLET_BACKEND`: `fake` by default; set to `blink` after the
-  Blink API key, wallet ID, and account ID are configured; `lnbits` remains
-  available for the older adapter
+- `STAGING_REVENUE_WALLET_BACKEND`: `fake` by default; set to `spark` after the
+  Spark mnemonic is configured; `lnbits` remains available for the older adapter
 - `STAGING_REVENUE_ENCRYPTION_KEY_VERSION`: defaults to `1`; increment on key
   rotation and retain old keys in `STAGING_REVENUE_ENCRYPTION_PREVIOUS_KEYS`
 - `STAGING_REVENUE_MAX_ROUTING_FEE_MSAT`: defaults to `5000`
@@ -134,11 +132,10 @@ Staging deploys with FakeWallet. Use it to verify enrollment, NIP-57 invoice
 creation, the exact 70/30 ledger split, receipt publication, the 14-sat payout
 threshold, and deferred payout behavior without spending sats.
 
-For the final real-sat canary, configure the Blink settings above, set
-`STAGING_REVENUE_WALLET_BACKEND=blink`, and rerun the staging workflow. The API
-key must have Read, Receive, and Write scopes. Start with one low-value zap and
-confirm the operator status endpoint reports no alerts before increasing
-volume. Switching the backend does not alter production and does not require
-running a Lightning node or channels on Wired infrastructure.
+For the final real-sat canary, configure the Spark settings above, set
+`STAGING_REVENUE_WALLET_BACKEND=spark`, and rerun the staging workflow. Start
+with one low-value funding payment followed by one 21-sat zap, and confirm the
+operator status endpoint reports the 14-sat creator payout before increasing
+volume. Spark does not require Wired to run a Lightning node or manage channels.
 
-Follow the bounded two-stage procedure in [blink-real-sat-canary.md](blink-real-sat-canary.md).
+Follow the bounded procedure in [spark-real-sat-canary.md](spark-real-sat-canary.md).

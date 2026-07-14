@@ -45,17 +45,17 @@ test("FakeWallet cannot be configured in production", () => {
   );
 });
 
-test("Blink can be selected as the managed revenue wallet", () => {
+test("Spark can be selected as the managed revenue wallet", () => {
   const wallet = createWalletFromConfig({
-    backend: "blink",
+    backend: "spark",
     nodeEnv: "production",
-    blink: {
-      endpoint: "https://api.blink.sv/graphql",
-      apiKey: "blink-secret",
-      walletId: "wallet-id",
-      accountId: "account-id",
+    spark: {
+      mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      network: "MAINNET",
+      accountNumber: 0,
+      maxFeeSats: 5,
     },
   });
 
-  assert.equal(wallet.backend, "blink");
+  assert.equal(wallet.backend, "spark");
 });

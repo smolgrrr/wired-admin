@@ -1399,11 +1399,11 @@ if (revenueEnabled) {
     lnbitsInvoiceKey: process.env.REVENUE_LNBITS_INVOICE_KEY || "",
     lnbitsAdminKey: process.env.REVENUE_LNBITS_ADMIN_KEY || "",
     lnbitsWebhookUrl: `${revenuePublicBaseUrl}/api/revenue/wallet/webhook`,
-    blink: {
-      endpoint: process.env.REVENUE_BLINK_ENDPOINT || "https://api.blink.sv/graphql",
-      apiKey: process.env.REVENUE_BLINK_API_KEY || "",
-      walletId: process.env.REVENUE_BLINK_WALLET_ID || "",
-      accountId: process.env.REVENUE_BLINK_ACCOUNT_ID || "",
+    spark: {
+      mnemonic: process.env.REVENUE_SPARK_MNEMONIC || "",
+      network: process.env.REVENUE_SPARK_NETWORK || "MAINNET",
+      accountNumber: Number(process.env.REVENUE_SPARK_ACCOUNT_NUMBER || 0),
+      maxFeeSats: Number(process.env.REVENUE_SPARK_MAX_FEE_SATS || 5),
     },
   });
   if (wallet instanceof FakeWallet) revenueFakeWallet = wallet;
