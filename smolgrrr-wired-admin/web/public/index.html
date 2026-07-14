@@ -199,6 +199,63 @@
           </div>
           <ol class="activity" id="actions"></ol>
         </section>
+
+        <section class="grid snapshot-grid">
+          <article class="metric">
+            <p>media mode</p>
+            <strong id="mediaMode">--</strong>
+          </article>
+          <article class="metric">
+            <p>queued</p>
+            <strong id="mediaQueue">0</strong>
+          </article>
+          <article class="metric">
+            <p>active scans</p>
+            <strong id="mediaActive">--</strong>
+          </article>
+          <article class="metric">
+            <p>scan latency</p>
+            <strong id="mediaLatency">--</strong>
+          </article>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>Add media override</h2></div>
+          <form class="moderation-form" id="mediaOverrideForm">
+            <label>
+              <span>target</span>
+              <select name="targetType">
+                <option value="sha256">SHA-256</option>
+                <option value="url">URL</option>
+              </select>
+            </label>
+            <label>
+              <span>decision</span>
+              <select name="decision">
+                <option value="allowed">Allow</option>
+                <option value="blocked">Block</option>
+              </select>
+            </label>
+            <label class="wide"><span>value</span><input name="target" required /></label>
+            <label class="wide"><span>note</span><input name="note" /></label>
+            <label><span>moderator</span><input name="moderator" value="local-admin" /></label>
+            <button class="button primary" type="submit">Add override</button>
+            <p class="form-status" id="mediaOverrideStatus"></p>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>Automatic media verdicts</h2></div>
+          <ol class="activity" id="mediaVerdicts"></ol>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Media overrides</h2></div>
+          <ol class="activity" id="mediaOverrides"></ol>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Media audit</h2></div>
+          <ol class="activity" id="mediaAudit"></ol>
+        </section>
       </section>
     </main>
     <script src="/app.js" type="module"></script>

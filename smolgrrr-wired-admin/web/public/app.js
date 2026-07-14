@@ -34,6 +34,15 @@ const ids = [
     "moderationForm",
     "formStatus",
     "refreshSnapshot",
+    "mediaMode",
+    "mediaQueue",
+    "mediaActive",
+    "mediaLatency",
+    "mediaVerdicts",
+    "mediaOverrides",
+    "mediaAudit",
+    "mediaOverrideForm",
+    "mediaOverrideStatus",
 ];
 function requireElement(id) {
     const element = document.getElementById(id);
@@ -46,6 +55,7 @@ elements.adminToken = requireElement("adminToken");
 elements.moderationForm = requireElement("moderationForm");
 elements.refreshSnapshot = requireElement("refreshSnapshot");
 elements.tokenForm = requireElement("tokenForm");
+elements.mediaOverrideForm = requireElement("mediaOverrideForm");
 const ADMIN_TOKEN_STORAGE_KEY = "wiredAdminToken";
 function adminToken() {
     return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY)?.trim() || "";
@@ -153,6 +163,75 @@ async function fetchActions() {
     const data = (await response.json());
     renderActions(data.actions || []);
 }
+function renderMediaAdmin(data) {
+    elements.mediaMode.textContent = data.status.mode;
+    elements.mediaQueue.textContent = String(data.status.queueDepth);
+    elements.mediaActive.textContent = `${data.status.activeImages} image / ${data.status.activeVideos} video`;
+    elements.mediaLatency.textContent = data.status.scanLatencyP95Ms === null
+        ? "--"
+        : `${data.status.scanLatencyP95Ms}ms p95`;
+    elements.mediaVerdicts.innerHTML = "";
+    for (const verdict of data.verdicts.slice(0, 100)) {
+        const item = activityItem(verdict.checkedAt, `${verdict.status} / ${verdict.mediaType}`, `${verdict.url} · ${verdict.reason}${verdict.sha256 ? ` · sha256:${verdict.sha256}` : ""}`);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "button";
+        button.textContent = "Re-scan";
+        button.addEventListener("click", () => requestRescan(verdict.url));
+        item.append(button);
+        elements.mediaVerdicts.append(item);
+    }
+    if (!data.verdicts.length) {
+        elements.mediaVerdicts.append(activityItem(Date.now(), "empty", "no media verdicts"));
+    }
+    elements.mediaOverrides.innerHTML = "";
+    for (const override of data.overrides) {
+        const item = activityItem(override.createdAt, `${override.decision} / ${override.targetType}`, `${override.target}${override.note ? ` · ${override.note}` : ""}`);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "button danger";
+        button.textContent = "Remove";
+        button.addEventListener("click", () => removeMediaOverride(override.id));
+        item.append(button);
+        elements.mediaOverrides.append(item);
+    }
+    if (!data.overrides.length) {
+        elements.mediaOverrides.append(activityItem(Date.now(), "empty", "no media overrides"));
+    }
+    elements.mediaAudit.innerHTML = "";
+    for (const entry of data.audit.slice(0, 100)) {
+        elements.mediaAudit.append(activityItem(entry.at, `${entry.action} / ${entry.actor}`, entry.target));
+    }
+}
+async function fetchMediaAdmin() {
+    const response = await fetch("/api/media-moderation/admin", {
+        cache: "no-store",
+        headers: adminHeaders(),
+    });
+    if (!response.ok) {
+        elements.mediaOverrideStatus.textContent =
+            response.status === 401 ? "Enter the admin token to review media." : `HTTP ${response.status}`;
+        return;
+    }
+    renderMediaAdmin((await response.json()));
+}
+async function requestRescan(url) {
+    const response = await fetch("/api/media-moderation/rescan", {
+        method: "POST",
+        headers: adminHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ url }),
+    });
+    elements.mediaOverrideStatus.textContent = response.ok ? "Re-scan queued" : "Re-scan failed";
+    await fetchMediaAdmin();
+}
+async function removeMediaOverride(id) {
+    const response = await fetch(`/api/media-moderation/overrides/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: adminHeaders(),
+    });
+    elements.mediaOverrideStatus.textContent = response.ok ? "Override removed" : "Remove failed";
+    await fetchMediaAdmin();
+}
 async function refresh() {
     try {
         const response = await fetch("/api/status", { cache: "no-store" });
@@ -222,7 +301,7 @@ function setupTokenForm() {
             localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
             elements.formStatus.textContent = "Admin token cleared";
         }
-        void Promise.all([refresh(), fetchActions()]);
+        void Promise.all([refresh(), fetchActions(), fetchMediaAdmin()]);
     });
 }
 function setupTabs() {
@@ -260,12 +339,35 @@ function setupModerationForm() {
         await Promise.all([refresh(), fetchActions()]);
     });
 }
+function setupMediaOverrideForm() {
+    elements.mediaOverrideForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const formData = new FormData(elements.mediaOverrideForm);
+        elements.mediaOverrideStatus.textContent = "Saving";
+        const response = await fetch("/api/media-moderation/overrides", {
+            method: "POST",
+            headers: adminHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify(Object.fromEntries(formData.entries())),
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            elements.mediaOverrideStatus.textContent = responseErrorMessage(data, `HTTP ${response.status}`);
+            return;
+        }
+        elements.mediaOverrideForm.reset();
+        elements.mediaOverrideStatus.textContent = "Override added";
+        await fetchMediaAdmin();
+    });
+}
 setupTokenForm();
 setupTabs();
 setupModerationForm();
+setupMediaOverrideForm();
 elements.refreshSnapshot.addEventListener("click", refreshSnapshot);
 refresh();
 fetchActions();
+fetchMediaAdmin();
 setInterval(refresh, 2500);
 setInterval(fetchActions, 10000);
+setInterval(fetchMediaAdmin, 5000);
 export {};

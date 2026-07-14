@@ -30,6 +30,11 @@ import { createFeedSnapshotService } from "./src/feed-snapshot-service.js";
 import { registerHttpRoutes } from "./src/http-routes.js";
 import { createRelayGateway } from "./src/relay-gateway.js";
 import { createHttpAccess } from "./src/http-access.js";
+import { createTransientMediaAnalyzer } from "./src/media-moderation/analyzer.js";
+import { registerMediaModerationRoutes } from "./src/media-moderation/http-routes.js";
+import { createNsfwJsClassifier } from "./src/media-moderation/local-classifier.js";
+import { createMediaModerationService } from "./src/media-moderation/service.js";
+import type { MediaModerationMode } from "./src/media-moderation/contracts.js";
 import { FakeWallet } from "./src/revenue/fake-wallet.js";
 import { createWalletFromConfig } from "./src/revenue/wallet-factory.js";
 import { registerRevenueRoutes } from "./src/revenue/http-routes.js";
@@ -79,6 +84,9 @@ const snapshotCacheFile =
   process.env.FEED_SNAPSHOT_CACHE_FILE || path.join(dataDir, "feed-bootstrap.json");
 const moderationStoreFile =
   process.env.WIRED_MODERATION_STORE || path.join(dataDir, "moderation.json");
+const mediaModerationStoreFile =
+  process.env.MEDIA_MODERATION_STORE_FILE ||
+  path.join(dataDir, "media-moderation.json");
 const confessStoreFile =
   process.env.CONFESS_STORE_FILE || path.join(dataDir, "confess.json");
 const wiredAccountStoreFile =
@@ -202,6 +210,35 @@ const confessXConfig = {
 };
 const confessXClient = createXClient(confessXConfig, confessXPostTimeoutMs);
 const moderation = createModerationService(moderationStoreFile);
+const configuredMediaModerationMode = String(
+  process.env.MEDIA_MODERATION_MODE || "off",
+).toLowerCase();
+const mediaModerationMode: MediaModerationMode =
+  configuredMediaModerationMode === "shadow" ||
+  configuredMediaModerationMode === "enforce"
+    ? configuredMediaModerationMode
+    : "off";
+const localMediaClassifier = createNsfwJsClassifier();
+const mediaAnalyzer = createTransientMediaAnalyzer({
+  classifier: localMediaClassifier,
+  exactBlockHashes: readEnvList("MEDIA_MODERATION_BLOCK_SHA256", []),
+  perceptualBlockHashes: readEnvList("MEDIA_MODERATION_BLOCK_DHASH", []),
+  blockThreshold: Math.max(
+    0,
+    Math.min(1, Number(process.env.MEDIA_MODERATION_BLOCK_THRESHOLD || 0.92)),
+  ),
+  reviewThreshold: Math.max(
+    0,
+    Math.min(1, Number(process.env.MEDIA_MODERATION_REVIEW_THRESHOLD || 0.65)),
+  ),
+});
+const mediaModeration = createMediaModerationService({
+  analyzer: mediaAnalyzer,
+  mode: mediaModerationMode,
+  moderation,
+  storeFile: mediaModerationStoreFile,
+  minimumEventPow: minPow,
+});
 const feedSnapshot = createFeedSnapshotService({
   cacheFile: snapshotCacheFile,
   refreshSeconds,
@@ -1465,7 +1502,7 @@ async function publishRevenueProfile(): Promise<void> {
 }
 
 app.disable("x-powered-by");
-app.use(express.json({ limit: "128kb" }));
+app.use(express.json({ limit: "1mb" }));
 app.use(httpAccess.middleware);
 
 if (revenueService) {
@@ -1479,6 +1516,11 @@ if (revenueService) {
     backupDirectory: process.env.REVENUE_BACKUP_DIR || path.join(dataDir, "revenue-backups"),
   });
 }
+
+registerMediaModerationRoutes(app, {
+  service: mediaModeration,
+  isAdminAuthorized: httpAccess.isAdminAuthorized,
+});
 
 registerHttpRoutes(app, {
   backendUrl,
@@ -1526,17 +1568,30 @@ server.on("upgrade", (request: IncomingMessage, socket: Socket, head: Buffer) =>
 
 await mkdir(dataDir, { recursive: true });
 await feedSnapshot.loadFromDisk();
+if (mediaModerationMode !== "off") {
+  await localMediaClassifier.warmup?.().catch((error) => {
+    console.error(
+      `Media moderation model warmup failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`,
+    );
+  });
+}
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`Wired Admin gateway listening on ${port}`);
   console.log(`Proxying Nostr traffic to ${backendUrl}`);
   console.log(`Feed snapshot cache: ${snapshotCacheFile}`);
+  console.log(`Media moderation: ${mediaModerationMode} (${mediaAnalyzer.version})`);
   if (revenueService) {
     console.log(`Revenue routing enabled with ${revenueService.publicConfig().walletBackend}`);
   }
 });
 
-server.on("close", () => revenueService?.close());
+server.on("close", () => {
+  revenueService?.close();
+  void mediaModeration.close();
+});
 
 if (revenueService) {
   void publishRevenueProfile().catch(() => {

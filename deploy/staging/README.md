@@ -79,6 +79,9 @@ Optional environment variables:
   URL on `STAGING_PORT`
 - `STAGING_PUBLIC_SMOKE_URLS`: optional public URLs for the deploy helper to
   check after the local app is ready
+- `STAGING_MEDIA_MODERATION_MODE`: `shadow` by default. Keep staging in shadow
+  until queue depth, p95 scan latency, and sampled verdicts have been reviewed;
+  use `enforce` only for an intentional end-to-end canary.
 
 The deploy job runs on the existing self-hosted runner labels:
 
@@ -124,7 +127,17 @@ VITE_ENRICHMENT_RELAYS=wss://staging.wiredsignal.online,wss://relay.damus.io,wss
 VITE_CONFESS_API_BASE=https://staging.wiredsignal.online
 VITE_WIRED_ACCOUNT_API_BASE=https://staging.wiredsignal.online
 VITE_REVENUE_API_BASE=https://staging.wiredsignal.online
+VITE_MEDIA_MODERATION_API_BASE=https://staging.wiredsignal.online
+VITE_MEDIA_MODERATION_MODE=shadow
+VITE_MEDIA_MODERATION_SURFACES=image,video
+VITE_MEDIA_MODERATION_COHORT_PERCENT=100
 ```
+
+For an enforcement canary, change only the client mode to `enforce` and begin
+with a small stable cohort percentage. The server's returned mode is an
+additional kill switch: a client configured for enforcement still reveals
+verdicts when the server remains in shadow mode. Set either mode to `off` to
+roll back without changing media URLs or origin delivery.
 
 ## Revenue testing and managed-wallet cutover
 

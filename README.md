@@ -19,6 +19,8 @@ Persistent app data is stored under Umbrel app data:
 - `data/strfry` for the relay database,
 - `data/web/feed-bootstrap.json` for the feed snapshot cache,
 - `data/web/moderation.json` for moderation actions.
+- `data/web/media-moderation.json` for media verdicts, hashes, durable jobs, and
+  administrator override audit records.
 - `data/web/wired-account.json` for Wired account post audit records.
 
 The community app enables `MODERATION_ADMIN_OPEN=true` for the local Umbrel
@@ -29,6 +31,52 @@ hosts only receive Nostr relay/NIP-11 traffic, `/api/feed/bootstrap`,
 supports exact hosts and suffix patterns such as `*.vercel.app` and `*.onion`;
 Vercel preview deployments are frontend origins and only need the public
 snapshot/manifest/relay/account endpoints.
+
+## Media moderation
+
+Wired Admin can classify note and reply images, animated images, and videos
+before the Wired client reveals them. Audio, avatars, profile metadata, emoji,
+and link previews are deliberately outside this first rollout.
+
+The service uses a bundled NSFWJS MobileNetV2 model through pure TensorFlow.js;
+model inference is local and does not call a third-party classification API. It
+also computes SHA-256 and 64-bit difference hashes locally. Configured exact or
+perceptual matches block before model classification. Media bytes are fetched
+with private-address and redirect checks, a 25 MiB limit, and timeouts. Bytes
+and extracted video frames are transient; the persistent store holds the media
+URL, hashes, verdict, detector version, timestamps, jobs, overrides, and audit
+metadata, not a copy of the media.
+
+This is a content-safety classifier, not a legal determination system. Legal
+classification, reporting, preservation, appeals, and qualified third-party
+hash-list integrations are deferred work.
+
+Runtime environment:
+
+- `MEDIA_MODERATION_MODE`: `off` (default), `shadow`, or `enforce`. Shadow mode
+  evaluates and records decisions without asking clients to hide media.
+- `MEDIA_MODERATION_STORE_FILE`: persistent JSON store path.
+- `MEDIA_MODERATION_BLOCK_THRESHOLD`: Porn/Hentai block threshold, default
+  `0.92`.
+- `MEDIA_MODERATION_REVIEW_THRESHOLD`: Porn/Hentai/Sexy review threshold,
+  default `0.65`. Review-required media remains covered in enforcement mode.
+- `MEDIA_MODERATION_BLOCK_SHA256`: comma-separated local exact block hashes.
+- `MEDIA_MODERATION_BLOCK_DHASH`: comma-separated local 16-character difference
+  hashes; matches within Hamming distance 4 block.
+
+The public client contract is `POST /api/media-moderation/verdicts`, with at
+most 100 event-bound attachments per request. `GET /api/media-moderation/status`
+exposes mode, detector version, queue depth, concurrency, counters, and observed
+p95 scan latency without exposing verdict data. The local admin console lists
+verdicts and audit entries and supports re-scan plus audited URL/SHA-256 allow
+or block overrides. Automatic URL verdicts expire after 15 minutes; content
+hash cache entries expire after seven days. Pending and unavailable decisions
+are never revealed by an enforcing client.
+
+Roll out in this order: server `shadow`, client `shadow`, inspect latency and
+false positives, then enable a small client cohort in `enforce`. Roll back
+immediately by setting either side to `off`; no media-hosting or CDN path is
+changed by this feature.
 
 ## Wired Account Posts
 
