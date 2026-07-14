@@ -120,7 +120,7 @@ test("Spark adapter creates description-hash invoices and recovers idempotent pa
   }), payment);
 });
 
-test("Spark adapter reports a provider-confirmed missing payment without sending it", async () => {
+test("Spark adapter treats an absent historical payment as unknown without sending it", async () => {
   let paymentAttempts = 0;
   const wallet = new SparkWallet({
     mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
@@ -148,10 +148,55 @@ test("Spark adapter reports a provider-confirmed missing payment without sending
     invoice: "lnbc14creator",
   }), {
     paymentId: "payout-missing",
-    status: "not_found",
+    status: "unknown",
     amountMsat: 14_000,
   });
   assert.equal(paymentAttempts, 0);
+});
+
+test("Spark adapter never marks post-Lightning-success failures as safely retryable", async () => {
+  const ambiguousStatuses = [
+    LightningSendRequestStatus.PREIMAGE_PROVIDING_FAILED,
+    LightningSendRequestStatus.TRANSFER_FAILED,
+    LightningSendRequestStatus.USER_SWAP_RETURNED,
+    LightningSendRequestStatus.USER_SWAP_RETURN_FAILED,
+  ];
+
+  for (const status of ambiguousStatuses) {
+    const request = {
+      id: `spark-send-${status}`,
+      createdAt: "2026-07-14T00:00:00.000Z",
+      updatedAt: "2026-07-14T00:00:00.000Z",
+      network: BitcoinNetwork.MAINNET,
+      typename: "LightningSendRequest",
+      status,
+      encodedInvoice: "lnbc14creator",
+      idempotencyKey: "payout-ambiguous",
+      fee: { originalValue: 0, originalUnit: CurrencyUnit.MILLISATOSHI },
+    };
+    const wallet = new SparkWallet({
+      mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      clientFactory: async () => ({
+        createLightningInvoice: async () => { throw new Error("unused"); },
+        getLightningReceiveRequest: async () => null,
+        getLightningSendFeeEstimate: async () => 1,
+        payLightningInvoice: async () => request,
+        getLightningSendRequest: async () => request,
+        getUserRequests: async () => ({
+          entities: [],
+          count: 0,
+          pageInfo: { hasNextPage: false },
+          typename: "SparkWalletUserToUserRequestsConnection",
+        }),
+      }),
+    });
+
+    assert.equal((await wallet.lookupPayment({
+      paymentId: request.id,
+      expectedAmountMsat: 14_000,
+      invoice: request.encodedInvoice,
+    })).status, "pending", status);
+  }
 });
 
 test("Spark adapter waits for transfer completion before finalizing the routing fee", async () => {
@@ -201,9 +246,9 @@ test("Spark adapter waits for transfer completion before finalizing the routing 
     amountMsat: 14_000,
   }), {
     paymentId: "spark-send-final-fee",
-    status: "pending",
+    status: "succeeded",
     amountMsat: 14_000,
-    feeMsat: 0,
+    feeMsat: 2_000,
   });
   assert.deepEqual(await wallet.lookupPayment({
     paymentId: "spark-send-final-fee",

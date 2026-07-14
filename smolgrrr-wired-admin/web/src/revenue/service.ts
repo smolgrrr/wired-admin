@@ -14,7 +14,7 @@ import {
   type RevenueEnrollment,
   type RevenueInvoice,
 } from "./ledger.js";
-import type { RevenueWallet } from "./wallet.js";
+import type { RevenueWallet, WalletPayment } from "./wallet.js";
 import {
   HttpLightningAddressResolver,
   parseLightningAddress,
@@ -435,25 +435,16 @@ export class RevenueService {
             this.#ledger.completePayout({
               payoutId: payout.payoutId,
               providerPaymentId: payment.paymentId,
-              feeMsat: payment.feeMsat ?? 0,
+              feeMsat: this.#requireFinalPaymentFeeMsat(payment),
             });
             result.completedPayouts += 1;
           } else if (payment.status === "not_found") {
-            if (now - payout.createdAt < this.#paymentNotFoundGraceMs) {
-              this.#ledger.markPayoutAmbiguous({
-                payoutId: payout.payoutId,
-                providerPaymentId: payout.providerPaymentId || payout.payoutId,
-                reason: "provider has not indexed the attempted payment yet",
-                nextAttemptAt: now + 60_000,
-              });
-            } else {
-              this.#ledger.releasePayout({
-                payoutId: payout.payoutId,
-                reason: "provider confirmed payment was not found",
-                nextAttemptAt: now + 5 * 60_000,
-              });
-              result.releasedPayouts += 1;
-            }
+            this.#ledger.markPayoutAmbiguous({
+              payoutId: payout.payoutId,
+              providerPaymentId: payout.providerPaymentId || payout.payoutId,
+              reason: "provider has not indexed the attempted payment; manual proof is required before retry",
+              nextAttemptAt: now + 60_000,
+            });
           } else if (payment.status === "failed") {
             this.#ledger.releasePayout({
               payoutId: payout.payoutId,
@@ -533,7 +524,7 @@ export class RevenueService {
     return this.#ledger.reconcileSucceededPayoutFee({
       payoutId,
       providerPaymentId: payment.paymentId,
-      feeMsat: payment.feeMsat ?? 0,
+      feeMsat: this.#requireFinalPaymentFeeMsat(payment),
     });
   }
 
@@ -639,7 +630,7 @@ export class RevenueService {
         return this.#ledger.completePayout({
           payoutId,
           providerPaymentId: payment.paymentId,
-          feeMsat: payment.feeMsat ?? 0,
+          feeMsat: this.#requireFinalPaymentFeeMsat(payment),
         });
       }
       if (payment.status === "pending" || payment.status === "unknown") {
@@ -663,5 +654,15 @@ export class RevenueService {
         nextAttemptAt: Date.now() + 60_000,
       });
     }
+  }
+
+  #requireFinalPaymentFeeMsat(payment: WalletPayment): number {
+    if (payment.feeMsat === undefined) {
+      throw new Error("provider final payment fee is missing");
+    }
+    if (!Number.isSafeInteger(payment.feeMsat) || payment.feeMsat < 0) {
+      throw new Error("provider final payment fee is invalid");
+    }
+    return payment.feeMsat;
   }
 }

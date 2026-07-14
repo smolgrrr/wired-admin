@@ -44,10 +44,11 @@ test("public HTTP contract completes the FakeWallet NIP-57 revenue transaction",
   });
   const app = express();
   app.use(express.json());
+  let adminAuthorized = true;
   registerRevenueRoutes(app, {
     service,
     fakeWallet: wallet,
-    isAdminAuthorized: () => true,
+    isAdminAuthorized: () => adminAuthorized,
     lnurlUsername: "wired",
     minSendableMsat: 1_000,
     maxSendableMsat: 1_000_000,
@@ -158,6 +159,14 @@ test("public HTTP contract completes the FakeWallet NIP-57 revenue transaction",
     );
     assert.equal(missingFeeReconciliation.status, 400);
     assert.deepEqual(await responseJson(missingFeeReconciliation), { error: "payout not found" });
+
+    adminAuthorized = false;
+    const unauthorizedFeeReconciliation = await fetch(
+      `${baseUrl}/api/revenue/operator/payouts/missing/reconcile-fee`,
+      { method: "POST" },
+    );
+    assert.equal(unauthorizedFeeReconciliation.status, 401);
+    assert.deepEqual(await responseJson(unauthorizedFeeReconciliation), { error: "unauthorized" });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     service.close();

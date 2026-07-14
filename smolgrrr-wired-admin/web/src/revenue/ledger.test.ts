@@ -150,7 +150,8 @@ test("an existing unversioned enrollment schema migrates to encryption key versi
 
 test("a finalized provider fee can correct an already completed payout without breaking conservation", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-final-fee-"));
-  const ledger = new RevenueLedger(path.join(directory, "revenue.sqlite"));
+  const databaseFile = path.join(directory, "revenue.sqlite");
+  const ledger = new RevenueLedger(databaseFile);
 
   try {
     ledger.creditSettledZap({
@@ -186,6 +187,32 @@ test("a finalized provider fee can correct an already completed payout without b
       providerPaymentId: "spark-send-1",
       feeMsat: 2_000,
     }).feeMsat, 2_000);
+
+    const audit = new DatabaseSync(databaseFile, { readOnly: true });
+    const entries = audit.prepare(`
+      SELECT unique_key, entry_type, wired_delta_msat
+      FROM revenue_ledger_entries
+      WHERE unique_key LIKE 'payout:spark-payout-1:%'
+      ORDER BY id
+    `).all().map((entry) => ({ ...entry }));
+    audit.close();
+    assert.deepEqual(entries, [
+      {
+        unique_key: "payout:spark-payout-1:reserve",
+        entry_type: "payout_reserve",
+        wired_delta_msat: 0,
+      },
+      {
+        unique_key: "payout:spark-payout-1:complete",
+        entry_type: "payout_complete",
+        wired_delta_msat: 0,
+      },
+      {
+        unique_key: "payout:spark-payout-1:fee-adjustment",
+        entry_type: "payout_fee_adjustment",
+        wired_delta_msat: -2_000,
+      },
+    ]);
   } finally {
     ledger.close();
     await rm(directory, { recursive: true, force: true });

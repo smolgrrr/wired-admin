@@ -62,10 +62,6 @@ const SEND_SUCCEEDED = new Set([
 const SEND_FAILED = new Set([
   LightningSendRequestStatus.USER_TRANSFER_VALIDATION_FAILED,
   LightningSendRequestStatus.LIGHTNING_PAYMENT_FAILED,
-  LightningSendRequestStatus.PREIMAGE_PROVIDING_FAILED,
-  LightningSendRequestStatus.TRANSFER_FAILED,
-  LightningSendRequestStatus.USER_SWAP_RETURNED,
-  LightningSendRequestStatus.USER_SWAP_RETURN_FAILED,
 ]);
 
 export class SparkWallet implements RevenueWallet {
@@ -163,12 +159,8 @@ export class SparkWallet implements RevenueWallet {
     amountMsat: number;
   }): Promise<WalletPayment> {
     this.#requireWholeSats(input.amountMsat, "Spark payments");
-    const existing = await this.lookupPayment({
-      paymentId: input.idempotencyKey,
-      expectedAmountMsat: input.amountMsat,
-      invoice: input.invoice,
-    });
-    if (existing.status !== "not_found") return existing;
+    const existing = await this.#lookupSendRequest(input.idempotencyKey, input.invoice);
+    if (existing) return this.#toWalletPayment(existing, input.amountMsat, input.invoice);
 
     const result = await (await this.#client()).payLightningInvoice({
       invoice: input.invoice,
@@ -179,21 +171,46 @@ export class SparkWallet implements RevenueWallet {
     if (!this.#isSendRequest(result)) {
       throw new Error("Spark did not return a Lightning send request");
     }
-    return this.#toWalletPayment(result, input.amountMsat, input.invoice);
+    return this.#waitForSendFinality(result, input.amountMsat, input.invoice);
   }
 
   async lookupPayment(input: WalletPaymentLookup): Promise<WalletPayment> {
-    const client = await this.#client();
-    let request = await client.getLightningSendRequest(input.paymentId).catch(() => null);
-    request ??= await this.#findSendRequest(input.paymentId, input.invoice);
+    const request = await this.#lookupSendRequest(input.paymentId, input.invoice);
     if (!request) {
       return {
         paymentId: input.paymentId,
-        status: "not_found",
+        status: "unknown",
         amountMsat: input.expectedAmountMsat || 0,
       };
     }
     return this.#toWalletPayment(request, input.expectedAmountMsat, input.invoice);
+  }
+
+  async #lookupSendRequest(paymentId: string, invoice: string): Promise<LightningSendRequest | null> {
+    const client = await this.#client();
+    let request = await client.getLightningSendRequest(paymentId).catch(() => null);
+    request ??= await this.#findSendRequest(paymentId, invoice);
+    return request;
+  }
+
+  async #waitForSendFinality(
+    initial: LightningSendRequest,
+    expectedAmountMsat: number,
+    invoice: string,
+  ): Promise<WalletPayment> {
+    let request = initial;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const payment = this.#toWalletPayment(request, expectedAmountMsat, invoice);
+      if (payment.status !== "pending") return payment;
+      const latest = await (await this.#client()).getLightningSendRequest(request.id).catch(() => null);
+      if (latest) {
+        request = latest;
+        const refreshed = this.#toWalletPayment(request, expectedAmountMsat, invoice);
+        if (refreshed.status !== "pending") return refreshed;
+      }
+      if (attempt < 7) await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return this.#toWalletPayment(request, expectedAmountMsat, invoice);
   }
 
   async #createInvoice(input: {

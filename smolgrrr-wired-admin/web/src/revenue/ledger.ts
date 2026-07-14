@@ -584,28 +584,37 @@ export class RevenueLedger {
     providerPaymentId: string;
     feeMsat: number;
   }): RevenuePayout {
-    const payout = this.payoutById(input.payoutId);
-    if (!payout) throw new Error("payout not found");
-    if (payout.state !== "succeeded") throw new Error("payout has not succeeded");
-    if (payout.providerPaymentId !== input.providerPaymentId) {
-      throw new Error("provider payment identity does not match the completed payout");
-    }
     if (!Number.isSafeInteger(input.feeMsat) || input.feeMsat < 0) {
       throw new Error("provider fee must be a non-negative integer millisatoshi value");
     }
-    if (payout.feeMsat === input.feeMsat) return payout;
 
     this.#database.exec("BEGIN IMMEDIATE");
     try {
+      const payout = this.payoutById(input.payoutId);
+      if (!payout) throw new Error("payout not found");
+      if (payout.state !== "succeeded") throw new Error("payout has not succeeded");
+      if (payout.providerPaymentId !== input.providerPaymentId) {
+        throw new Error("provider payment identity does not match the completed payout");
+      }
+      if (payout.feeMsat === null) throw new Error("completed payout fee is missing");
+      if (payout.feeMsat === input.feeMsat) {
+        this.#database.exec("COMMIT");
+        return payout;
+      }
       const now = Date.now();
       const ledger = this.#database
         .prepare(`
-          UPDATE revenue_ledger_entries
-          SET wired_delta_msat = ?
-          WHERE unique_key = ? AND entry_type = 'payout_complete'
+          INSERT OR IGNORE INTO revenue_ledger_entries (
+            unique_key, payout_key, entry_type, wired_delta_msat, created_at
+          ) VALUES (?, ?, 'payout_fee_adjustment', ?, ?)
         `)
-        .run(-input.feeMsat, `payout:${input.payoutId}:complete`);
-      if (ledger.changes !== 1) throw new Error("completed payout ledger entry is missing");
+        .run(
+          `payout:${input.payoutId}:fee-adjustment`,
+          payout.payoutKey,
+          payout.feeMsat - input.feeMsat,
+          now,
+        );
+      if (ledger.changes !== 1) throw new Error("completed payout fee was already adjusted");
       const updated = this.#database
         .prepare(`
           UPDATE revenue_payouts SET fee_msat = ?, updated_at = ?

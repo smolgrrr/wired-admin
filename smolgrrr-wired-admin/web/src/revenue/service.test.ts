@@ -408,14 +408,27 @@ test("an ambiguous outgoing payment stays reserved until provider reconciliation
     assert.equal(service.payoutStatusForEvent(event.id).state, "ambiguous");
     assert.equal(service.balanceForEvent(event.id).reservedMsat, 21_000);
 
+    await service.reconcileAll(Date.now() + 2 * 86_400_000);
+    assert.equal(service.payoutStatusForEvent(event.id).state, "ambiguous");
+    assert.equal(service.balanceForEvent(event.id).reservedMsat, 21_000);
+
     wallet.payments.set(payout.providerPaymentId as string, successfulPayment);
-    await service.reconcileAll(Date.now() + 122_000);
+    await service.reconcileAll(Date.now() + 2 * 86_400_000 + 61_000);
     assert.equal(service.payoutStatusForEvent(event.id).state, "succeeded");
     assert.deepEqual(service.balanceForEvent(event.id), {
       availableMsat: 0,
       reservedMsat: 0,
       paidMsat: 21_000,
     });
+    wallet.payments.set(payout.providerPaymentId as string, {
+      paymentId: successfulPayment.paymentId,
+      status: "succeeded",
+      amountMsat: successfulPayment.amountMsat,
+    });
+    await assert.rejects(
+      service.reconcileSucceededPayoutFee(payout.payoutId),
+      /provider final payment fee is missing/,
+    );
     wallet.payments.set(payout.providerPaymentId as string, {
       ...successfulPayment,
       feeMsat: 2_000,
