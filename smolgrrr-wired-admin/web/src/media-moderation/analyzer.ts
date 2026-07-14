@@ -147,7 +147,13 @@ export function createTransientMediaAnalyzer({
     }
 
     const cached = await lookupVerifiedHash?.(contentHash);
-    if (cached) return cached;
+    if (cached) {
+      return {
+        ...cached,
+        sha256: contentHash,
+        perceptualHash,
+      };
+    }
 
     const signals = aggregateSignals(
       await Promise.all(frames.map((frame) => classifier.classify(frame))),

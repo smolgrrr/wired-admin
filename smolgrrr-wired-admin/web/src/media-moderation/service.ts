@@ -82,13 +82,23 @@ export function createMediaModerationService({
     stored: StoredMediaVerdict,
   ): MediaVerdict {
     const override = store.findOverride(stored.url, stored.sha256);
+    const claimedHashMismatch = Boolean(
+      !override &&
+      stored.sha256 &&
+      item.claimedHash &&
+      item.claimedHash.toLowerCase() !== stored.sha256.toLowerCase(),
+    );
     return {
       requestId: item.requestId,
       eventId: item.event.id,
       url: stored.url,
       mediaType: stored.mediaType,
-      status: override?.decision ?? stored.status,
-      reason: override
+      status: claimedHashMismatch
+        ? "review-required"
+        : override?.decision ?? stored.status,
+      reason: claimedHashMismatch
+        ? "claimed_hash_mismatch"
+        : override
         ? override.decision === "allowed"
           ? "admin_allow_override"
           : "admin_block_override"
@@ -116,7 +126,6 @@ export function createMediaModerationService({
       eventId: item.event.id,
       url,
       mediaType: item.mediaType,
-      ...(item.claimedHash ? { claimedHash: item.claimedHash.toLowerCase() } : {}),
       createdAt: Date.now(),
       attempts: 0,
     };
@@ -133,8 +142,19 @@ export function createMediaModerationService({
         eventId: job.eventId,
         mediaType: job.mediaType,
         url: job.url,
-        ...(job.claimedHash ? { claimedHash: job.claimedHash } : {}),
         lookupVerifiedHash(hash) {
+          const override = store.findOverride(job.url, hash);
+          if (override) {
+            return {
+              sha256: hash,
+              perceptualHash: "0000000000000000",
+              signals: [],
+              status: override.decision,
+              reason: override.decision === "allowed"
+                ? "admin_allow_override"
+                : "admin_block_override",
+            };
+          }
           const cached = store.getByHash(hash);
           if (
             !cached ||
@@ -269,6 +289,21 @@ export function createMediaModerationService({
         mediaType: item.mediaType,
         status: "blocked",
         reason: "manual_domain_block",
+        expiresAt: null,
+      };
+    }
+
+    const urlOverride = store.findOverride(url);
+    if (urlOverride) {
+      return {
+        requestId: item.requestId,
+        eventId: item.event.id,
+        url,
+        mediaType: item.mediaType,
+        status: urlOverride.decision,
+        reason: urlOverride.decision === "allowed"
+          ? "admin_allow_override"
+          : "admin_block_override",
         expiresAt: null,
       };
     }

@@ -226,10 +226,9 @@ test("an uncached verdict becomes content-bound and survives a service restart",
   }
 });
 
-test("a claimed hash never reuses a cached allow before byte verification", async () => {
+test("a claimed hash mismatch is request-specific and cannot poison a shared URL", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "wired-media-claims-"));
   const moderation = createModerationService(path.join(directory, "moderation.json"));
-  const firstUrl = "https://cdn.example.com/first.jpg";
   const secondUrl = "https://cdn.example.com/unverified.jpg";
   const makeEvent = (url: string, seed: number) => finalizeEvent({
     kind: 1,
@@ -247,24 +246,16 @@ test("a claimed hash never reuses a cached allow before byte verification", asyn
       async analyze(input) {
         analyses += 1;
         return {
-          sha256: analyses === 1 ? "d".repeat(64) : "e".repeat(64),
+          sha256: "e".repeat(64),
           perceptualHash: "0123456789abcdef",
           signals: [],
-          status: analyses === 1 ? "allowed" : "review-required",
-          reason: analyses === 1 ? "policy_allowed" : "claimed_hash_mismatch",
+          status: "allowed",
+          reason: "policy_allowed",
         };
       },
     },
   });
   try {
-    const first = {
-      requestId: "first",
-      event: makeEvent(firstUrl, 10),
-      mediaType: "image" as const,
-      url: firstUrl,
-    };
-    await service.getVerdicts([first]);
-    await service.waitForIdle();
     const claimed = {
       requestId: "claimed",
       event: makeEvent(secondUrl, 11),
@@ -272,10 +263,63 @@ test("a claimed hash never reuses a cached allow before byte verification", asyn
       url: secondUrl,
       claimedHash: "d".repeat(64),
     };
-    assert.equal((await service.getVerdicts([claimed])).verdicts[0]?.status, "pending");
+    const legitimate = {
+      requestId: "legitimate",
+      event: makeEvent(secondUrl, 12),
+      mediaType: "image" as const,
+      url: secondUrl,
+    };
+    const pending = await service.getVerdicts([claimed, legitimate]);
+    assert.deepEqual(pending.verdicts.map((verdict) => verdict.status), ["pending", "pending"]);
     await service.waitForIdle();
-    assert.equal(analyses, 2);
+    assert.equal(analyses, 1);
     assert.equal((await service.getVerdicts([claimed])).verdicts[0]?.status, "review-required");
+    assert.equal((await service.getVerdicts([legitimate])).verdicts[0]?.status, "allowed");
+  } finally {
+    await service.close();
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("a URL block override is authoritative before cache or analysis", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-media-url-override-"));
+  const moderation = createModerationService(path.join(directory, "moderation.json"));
+  const url = "https://cdn.example.com/immediate-block.jpg";
+  const event = finalizeEvent({
+    kind: 1,
+    created_at: 1_700_000_025,
+    tags: [["imeta", `url ${url}`, "m image/jpeg"]],
+    content: url,
+  }, new Uint8Array(32).fill(15));
+  let analyses = 0;
+  const service = createMediaModerationService({
+    mode: "enforce",
+    moderation,
+    storeFile: path.join(directory, "media.json"),
+    analyzer: {
+      version: "override-precedence-v1",
+      async analyze() {
+        analyses += 1;
+        throw new Error("URL override must prevent analysis");
+      },
+    },
+  });
+  try {
+    await service.createOverride({
+      targetType: "url",
+      target: url,
+      decision: "blocked",
+      moderator: "test-admin",
+    });
+    const verdict = await service.getVerdicts([{
+      requestId: "immediate",
+      event,
+      mediaType: "image",
+      url,
+    }]);
+    assert.equal(verdict.verdicts[0]?.status, "blocked");
+    assert.equal(verdict.verdicts[0]?.reason, "admin_block_override");
+    assert.equal(analyses, 0);
   } finally {
     await service.close();
     await rm(directory, { force: true, recursive: true });
