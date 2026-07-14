@@ -40,6 +40,34 @@ function isPublicHttpRouteAllowed(req: Request): boolean {
     return req.method === "POST" || req.method === "OPTIONS";
   }
 
+  if (url.pathname === "/api/revenue/config") {
+    return req.method === "GET" || req.method === "OPTIONS";
+  }
+
+  if (url.pathname === "/api/revenue/address/validate") {
+    return req.method === "POST" || req.method === "OPTIONS";
+  }
+
+  if (url.pathname === "/api/revenue/enroll") {
+    return req.method === "POST" || req.method === "OPTIONS";
+  }
+
+  if (/^\/api\/revenue\/enroll\/[^/]+\/(?:activate|fail)$/.test(url.pathname)) {
+    return req.method === "POST" || req.method === "OPTIONS";
+  }
+
+  if (url.pathname === "/api/revenue/zap") {
+    return req.method === "GET" || req.method === "OPTIONS";
+  }
+
+  if (url.pathname === "/api/revenue/wallet/webhook") {
+    return req.method === "POST" || req.method === "OPTIONS";
+  }
+
+  if (url.pathname.startsWith("/.well-known/lnurlp/")) {
+    return req.method === "GET" || req.method === "OPTIONS";
+  }
+
   return false;
 }
 

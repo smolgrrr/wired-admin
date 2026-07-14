@@ -133,6 +133,7 @@ export type CreateWiredAccountPostResponse = {
   event: NostrEvent;
   acceptedRelays: string[];
   minimumPow: number;
+  revenueEnrolled?: boolean;
 };
 
 export type RelayInfo = {

@@ -1,15 +1,17 @@
 {
   "name": "wired-admin-web",
-  "version": "0.2.13",
+  "version": "0.2.15",
   "type": "module",
   "private": true,
   "scripts": {
     "build": "rm -rf dist dist-admin-client && tsc -p tsconfig.json && tsc -p tsconfig.admin-client.json && cp dist-admin-client/admin-client/app.js public/app.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.admin-client.json --noEmit",
+    "test": "npm run build && node --test dist/src/**/*.test.js",
     "start": "node dist/server.js",
     "check": "npm run typecheck && npm run build && node --check dist/server.js"
   },
   "dependencies": {
+    "@buildonspark/spark-sdk": "0.8.8",
     "express": "^4.19.2",
     "nostr-tools": "^2.23.8",
     "sharp": "^0.35.3",

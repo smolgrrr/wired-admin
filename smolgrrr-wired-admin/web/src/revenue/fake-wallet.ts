@@ -1,0 +1,107 @@
+import crypto from "node:crypto";
+import type {
+  RevenueWallet,
+  WalletInvoice,
+  WalletPayment,
+  WalletPaymentLookup,
+} from "./wallet.js";
+
+type FakeInvoice = WalletInvoice & { settledAt?: number };
+
+export class FakeWallet implements RevenueWallet {
+  readonly backend = "fake";
+  readonly #invoices = new Map<string, FakeInvoice>();
+  readonly #invoiceIds = new Map<string, string>();
+  readonly #payments = new Map<string, WalletPayment>();
+  #invoiceSequence = 0;
+  #settlementSequence = 0;
+
+  async createInvoice(input: {
+    amountMsat: number;
+    descriptionHash: string;
+    idempotencyKey: string;
+  }): Promise<WalletInvoice> {
+    const existingHash = this.#invoiceIds.get(input.idempotencyKey);
+    const existing = existingHash ? this.#invoices.get(existingHash) : undefined;
+    if (existing) return { ...existing };
+    if (!Number.isSafeInteger(input.amountMsat) || input.amountMsat <= 0) {
+      throw new Error("invoice amount must be positive integer millisatoshis");
+    }
+    if (!/^[0-9a-f]{64}$/i.test(input.descriptionHash)) {
+      throw new Error("description hash must be 32-byte hex");
+    }
+    this.#invoiceSequence += 1;
+    const paymentHash = crypto
+      .createHash("sha256")
+      .update(`${this.#invoiceSequence}:${input.amountMsat}:${input.descriptionHash}`)
+      .digest("hex");
+    const invoice: FakeInvoice = {
+      paymentHash,
+      invoice: `lnbc${Math.ceil(input.amountMsat / 1000)}n1fake${paymentHash}`,
+      amountMsat: input.amountMsat,
+      status: "pending",
+    };
+    this.#invoices.set(paymentHash, invoice);
+    this.#invoiceIds.set(input.idempotencyKey, paymentHash);
+    return { ...invoice };
+  }
+
+  async lookupInvoice(paymentHash: string): Promise<Omit<WalletInvoice, "invoice">> {
+    const invoice = this.#invoices.get(paymentHash);
+    if (!invoice) throw new Error("invoice not found");
+    const result: Omit<WalletInvoice, "invoice"> = {
+      paymentHash: invoice.paymentHash,
+      amountMsat: invoice.amountMsat,
+      status: invoice.status,
+    };
+    if (invoice.settledAt !== undefined) result.settledAt = invoice.settledAt;
+    return result;
+  }
+
+  async settleInvoice(paymentHash: string): Promise<void> {
+    const invoice = this.#invoices.get(paymentHash);
+    if (!invoice) throw new Error("invoice not found");
+    if (invoice.status === "settled") return;
+    this.#settlementSequence += 1;
+    invoice.status = "settled";
+    invoice.settledAt = this.#settlementSequence;
+  }
+
+  async estimateFeeMsat(_invoice: string): Promise<number> {
+    return 0;
+  }
+
+  async payInvoice(input: {
+    invoice: string;
+    idempotencyKey: string;
+    amountMsat: number;
+  }): Promise<WalletPayment> {
+    const existing = this.#payments.get(input.idempotencyKey);
+    if (existing) return { ...existing };
+    if (!Number.isSafeInteger(input.amountMsat) || input.amountMsat <= 0) {
+      throw new Error("payment amount must be positive integer millisatoshis");
+    }
+    const payment: WalletPayment = {
+      paymentId: `fake-payment:${input.idempotencyKey}`,
+      status: "succeeded",
+      amountMsat: input.amountMsat,
+      feeMsat: 0,
+    };
+    this.#payments.set(input.idempotencyKey, payment);
+    return { ...payment };
+  }
+
+  async lookupPayment(input: WalletPaymentLookup): Promise<WalletPayment> {
+    const payment = this.#payments.get(input.paymentId) ?? Array.from(this.#payments.values()).find(
+      (candidate) => candidate.paymentId === input.paymentId,
+    );
+    if (!payment) {
+      return {
+        paymentId: input.paymentId,
+        status: "not_found",
+        amountMsat: input.expectedAmountMsat || 0,
+      };
+    }
+    return { ...payment };
+  }
+}

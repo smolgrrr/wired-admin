@@ -21,6 +21,40 @@ services:
       WIRED_MODERATION_STORE: "/app/data/moderation.json"
       CONFESS_STORE_FILE: "/app/data/confess.json"
       WIRED_ACCOUNT_STORE_FILE: "/app/data/wired-account.json"
+      REVENUE_ENABLED: "true"
+      REVENUE_DATABASE_FILE: "/app/data/revenue.sqlite"
+      REVENUE_PUBLIC_BASE_URL: "https://staging.wiredsignal.online"
+      REVENUE_RELAY_URL: "wss://staging.wiredsignal.online"
+      REVENUE_LNURL_USERNAME: "wired"
+      REVENUE_WALLET_BACKEND: "fake"
+      REVENUE_ALLOW_FAKE_WALLET: "true"
+      REVENUE_ENCRYPTION_KEY: ""
+      REVENUE_ENCRYPTION_KEY_VERSION: "1"
+      REVENUE_ENCRYPTION_PREVIOUS_KEYS: ""
+      REVENUE_RECONCILE_SECONDS: "30"
+      REVENUE_SPARK_MNEMONIC: ""
+      REVENUE_SPARK_NETWORK: "MAINNET"
+      REVENUE_SPARK_ACCOUNT_NUMBER: "1"
+      REVENUE_SPARK_MAX_FEE_SATS: "5"
+      REVENUE_LNBITS_ENDPOINT: ""
+      REVENUE_LNBITS_INVOICE_KEY: ""
+      REVENUE_LNBITS_ADMIN_KEY: ""
+      REVENUE_ACCEPT_ENROLLMENTS: "true"
+      REVENUE_ACCEPT_INVOICES: "true"
+      REVENUE_SEND_PAYOUTS: "false"
+      REVENUE_PUBLISH_PROFILE: "true"
+      REVENUE_PROFILE_NAME: "Wired Staging"
+      REVENUE_PROFILE_DISPLAY_NAME: "Wired Staging"
+      REVENUE_PROFILE_ABOUT: "Proof-of-work posts routed through Wired staging."
+      REVENUE_PROFILE_WEBSITE: ""
+      REVENUE_PROFILE_PICTURE: ""
+      REVENUE_PROFILE_BANNER: ""
+      REVENUE_PROFILE_NIP05: ""
+      REVENUE_MINIMUM_PAYOUT_MSAT: "14000"
+      REVENUE_MIN_SENDABLE_MSAT: "1000"
+      REVENUE_MAX_SENDABLE_MSAT: "21000"
+      REVENUE_MAX_ROUTING_FEE_MSAT: "5000"
+      REVENUE_PAYMENT_NOT_FOUND_GRACE_MS: "86400000"
       WIRED_NOSTR_SECRET_KEY: ""
       WIRED_ACCOUNT_MIN_POW: "16"
       WIRED_ACCOUNT_RELAYS: ""
@@ -56,6 +90,16 @@ services:
     depends_on:
       - relay
 
+  relay_init:
+    container_name: smolgrrr-wired-admin-staging_relay_init_1
+    image: ghcr.io/hoytech/strfry@sha256:c52807349888ef8a9f8720f3e51ee81af7e20114bad105915febb78f9c604cb1
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["chown"]
+    command: ["-R", "1000:1000", "/app/strfry-db"]
+    volumes:
+      - ${APP_DATA_DIR}/data/strfry:/app/strfry-db
+
   relay:
     container_name: smolgrrr-wired-admin-staging_relay_1
     image: ghcr.io/hoytech/strfry@sha256:c52807349888ef8a9f8720f3e51ee81af7e20114bad105915febb78f9c604cb1
@@ -64,6 +108,9 @@ services:
     stop_grace_period: 30s
     working_dir: /etc/strfry
     command: ["relay"]
+    depends_on:
+      relay_init:
+        condition: service_completed_successfully
     volumes:
       - ${APP_DATA_DIR}/data/strfry:/app/strfry-db
       - ${APP_DATA_DIR}/strfry.conf:/etc/strfry/strfry.conf:ro
