@@ -416,6 +416,13 @@ test("an ambiguous outgoing payment stays reserved until provider reconciliation
       reservedMsat: 0,
       paidMsat: 21_000,
     });
+    wallet.payments.set(payout.providerPaymentId as string, {
+      ...successfulPayment,
+      feeMsat: 2_000,
+    });
+    const corrected = await service.reconcileSucceededPayoutFee(payout.payoutId);
+    assert.equal(corrected.feeMsat, 2_000);
+    assert.equal(service.operatorStatus().wiredRevenueMsat, 7_000);
   } finally {
     service.close();
     await rm(directory, { recursive: true, force: true });

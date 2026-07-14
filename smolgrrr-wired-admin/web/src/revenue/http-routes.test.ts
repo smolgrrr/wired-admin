@@ -151,6 +151,13 @@ test("public HTTP contract completes the FakeWallet NIP-57 revenue transaction",
     assert.equal(status.creatorAvailableMsat, 7_000);
     assert.equal(status.wiredRevenueMsat, 3_000);
     assert.equal(JSON.stringify(status).includes("creator@fake.invalid"), false);
+
+    const missingFeeReconciliation = await fetch(
+      `${baseUrl}/api/revenue/operator/payouts/missing/reconcile-fee`,
+      { method: "POST" },
+    );
+    assert.equal(missingFeeReconciliation.status, 400);
+    assert.deepEqual(await responseJson(missingFeeReconciliation), { error: "payout not found" });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     service.close();

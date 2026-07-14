@@ -153,3 +153,66 @@ test("Spark adapter reports a provider-confirmed missing payment without sending
   });
   assert.equal(paymentAttempts, 0);
 });
+
+test("Spark adapter waits for transfer completion before finalizing the routing fee", async () => {
+  const baseRequest = {
+    id: "spark-send-final-fee",
+    createdAt: "2026-07-14T00:00:00.000Z",
+    updatedAt: "2026-07-14T00:00:00.000Z",
+    network: BitcoinNetwork.MAINNET,
+    typename: "LightningSendRequest",
+    encodedInvoice: "lnbc14creator",
+    idempotencyKey: "payout-final-fee",
+  };
+  const intermediate = {
+    ...baseRequest,
+    status: LightningSendRequestStatus.LIGHTNING_PAYMENT_SUCCEEDED,
+    fee: { originalValue: 0, originalUnit: CurrencyUnit.MILLISATOSHI },
+  };
+  const completed = {
+    ...baseRequest,
+    status: LightningSendRequestStatus.TRANSFER_COMPLETED,
+    fee: { originalValue: 2_000, originalUnit: CurrencyUnit.MILLISATOSHI },
+  };
+  let sent = false;
+  const wallet = new SparkWallet({
+    mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    clientFactory: async () => ({
+      createLightningInvoice: async () => { throw new Error("unused"); },
+      getLightningReceiveRequest: async () => null,
+      getLightningSendFeeEstimate: async () => 2,
+      payLightningInvoice: async () => {
+        sent = true;
+        return intermediate;
+      },
+      getLightningSendRequest: async (id) => sent && id === completed.id ? completed : null,
+      getUserRequests: async () => ({
+        entities: [],
+        count: 0,
+        pageInfo: { hasNextPage: false },
+        typename: "SparkWalletUserToUserRequestsConnection",
+      }),
+    }),
+  });
+
+  assert.deepEqual(await wallet.payInvoice({
+    invoice: "lnbc14creator",
+    idempotencyKey: "payout-final-fee",
+    amountMsat: 14_000,
+  }), {
+    paymentId: "spark-send-final-fee",
+    status: "pending",
+    amountMsat: 14_000,
+    feeMsat: 0,
+  });
+  assert.deepEqual(await wallet.lookupPayment({
+    paymentId: "spark-send-final-fee",
+    expectedAmountMsat: 14_000,
+    invoice: "lnbc14creator",
+  }), {
+    paymentId: "spark-send-final-fee",
+    status: "succeeded",
+    amountMsat: 14_000,
+    feeMsat: 2_000,
+  });
+});

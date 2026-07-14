@@ -579,6 +579,48 @@ export class RevenueLedger {
     return this.payoutById(input.payoutId) as RevenuePayout;
   }
 
+  reconcileSucceededPayoutFee(input: {
+    payoutId: string;
+    providerPaymentId: string;
+    feeMsat: number;
+  }): RevenuePayout {
+    const payout = this.payoutById(input.payoutId);
+    if (!payout) throw new Error("payout not found");
+    if (payout.state !== "succeeded") throw new Error("payout has not succeeded");
+    if (payout.providerPaymentId !== input.providerPaymentId) {
+      throw new Error("provider payment identity does not match the completed payout");
+    }
+    if (!Number.isSafeInteger(input.feeMsat) || input.feeMsat < 0) {
+      throw new Error("provider fee must be a non-negative integer millisatoshi value");
+    }
+    if (payout.feeMsat === input.feeMsat) return payout;
+
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const now = Date.now();
+      const ledger = this.#database
+        .prepare(`
+          UPDATE revenue_ledger_entries
+          SET wired_delta_msat = ?
+          WHERE unique_key = ? AND entry_type = 'payout_complete'
+        `)
+        .run(-input.feeMsat, `payout:${input.payoutId}:complete`);
+      if (ledger.changes !== 1) throw new Error("completed payout ledger entry is missing");
+      const updated = this.#database
+        .prepare(`
+          UPDATE revenue_payouts SET fee_msat = ?, updated_at = ?
+          WHERE payout_id = ? AND state = 'succeeded' AND provider_payment_id = ?
+        `)
+        .run(input.feeMsat, now, input.payoutId, input.providerPaymentId);
+      if (updated.changes !== 1) throw new Error("completed payout changed during fee reconciliation");
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
+    return this.payoutById(input.payoutId) as RevenuePayout;
+  }
+
   releasePayout(input: { payoutId: string; reason: string; nextAttemptAt: number }): RevenuePayout {
     const payout = this.payoutById(input.payoutId);
     if (!payout) throw new Error("payout not found");

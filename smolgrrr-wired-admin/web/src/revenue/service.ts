@@ -512,6 +512,31 @@ export class RevenueService {
     return payout;
   }
 
+  async reconcileSucceededPayoutFee(payoutId: string): Promise<RevenuePayout> {
+    const payout = this.#ledger.payoutById(payoutId);
+    if (!payout) throw new Error("payout not found");
+    if (payout.state !== "succeeded") throw new Error("payout has not succeeded");
+    if (!payout.invoice || !payout.providerPaymentId) {
+      throw new Error("completed payout is missing its provider identity");
+    }
+    const payment = await this.#wallet.lookupPayment({
+      paymentId: payout.providerPaymentId,
+      expectedAmountMsat: payout.amountMsat,
+      invoice: payout.invoice,
+    });
+    if (payment.status !== "succeeded") {
+      throw new Error(`provider payment is not final: ${payment.status}`);
+    }
+    if (payment.paymentId !== payout.providerPaymentId) {
+      throw new Error("provider returned an unexpected payment identity");
+    }
+    return this.#ledger.reconcileSucceededPayoutFee({
+      payoutId,
+      providerPaymentId: payment.paymentId,
+      feeMsat: payment.feeMsat ?? 0,
+    });
+  }
+
   backupTo(directory: string): { filename: string } {
     const filename = path.join(directory, `revenue-${new Date().toISOString().replaceAll(":", "-")}.sqlite`);
     this.#ledger.backupTo(filename);

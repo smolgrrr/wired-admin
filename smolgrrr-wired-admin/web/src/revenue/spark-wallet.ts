@@ -56,10 +56,7 @@ const RECEIVE_SETTLED = new Set([
 ]);
 
 const SEND_SUCCEEDED = new Set([
-  LightningSendRequestStatus.LIGHTNING_PAYMENT_SUCCEEDED,
-  LightningSendRequestStatus.PREIMAGE_PROVIDED,
   LightningSendRequestStatus.TRANSFER_COMPLETED,
-  LightningSendRequestStatus.USER_SWAP_RETURNED,
 ]);
 
 const SEND_FAILED = new Set([
@@ -67,6 +64,7 @@ const SEND_FAILED = new Set([
   LightningSendRequestStatus.LIGHTNING_PAYMENT_FAILED,
   LightningSendRequestStatus.PREIMAGE_PROVIDING_FAILED,
   LightningSendRequestStatus.TRANSFER_FAILED,
+  LightningSendRequestStatus.USER_SWAP_RETURNED,
   LightningSendRequestStatus.USER_SWAP_RETURN_FAILED,
 ]);
 

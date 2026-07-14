@@ -148,6 +148,50 @@ test("an existing unversioned enrollment schema migrates to encryption key versi
   }
 });
 
+test("a finalized provider fee can correct an already completed payout without breaking conservation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-final-fee-"));
+  const ledger = new RevenueLedger(path.join(directory, "revenue.sqlite"));
+
+  try {
+    ledger.creditSettledZap({
+      settlementId: "spark:settlement:1",
+      eventId: "a".repeat(64),
+      payoutKey: "creator-address-snapshot",
+      amountMsat: 21_000,
+    });
+    ledger.reservePayout({
+      payoutId: "spark-payout-1",
+      payoutKey: "creator-address-snapshot",
+      amountMsat: 14_000,
+      invoice: "lnbc14creator",
+    });
+    ledger.completePayout({
+      payoutId: "spark-payout-1",
+      providerPaymentId: "spark-send-1",
+      feeMsat: 0,
+    });
+
+    const corrected = ledger.reconcileSucceededPayoutFee({
+      payoutId: "spark-payout-1",
+      providerPaymentId: "spark-send-1",
+      feeMsat: 2_000,
+    });
+
+    assert.equal(corrected.feeMsat, 2_000);
+    assert.equal(ledger.wiredRevenueMsat(), 4_300);
+    assert.equal(ledger.totalLedgerMsat(), 19_000);
+    assert.equal(ledger.accountingDivergenceMsat(), 0);
+    assert.equal(ledger.reconcileSucceededPayoutFee({
+      payoutId: "spark-payout-1",
+      providerPaymentId: "spark-send-1",
+      feeMsat: 2_000,
+    }).feeMsat, 2_000);
+  } finally {
+    ledger.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("invoice creation leases are exclusive across processes and recover after expiry", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "wired-revenue-intent-"));
   const databaseFile = path.join(directory, "revenue.sqlite");

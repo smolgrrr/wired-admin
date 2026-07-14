@@ -178,6 +178,24 @@ export function registerRevenueRoutes(app: Application, options: RevenueRoutesOp
     res.json({ ok: true, ...(await service.reconcileAll()) });
   });
 
+  app.post("/api/revenue/operator/payouts/:payoutId/reconcile-fee", async (req: Request, res: Response) => {
+    if (!options.isAdminAuthorized(req)) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    try {
+      const payout = await service.reconcileSucceededPayoutFee(String(req.params.payoutId || ""));
+      res.json({
+        ok: true,
+        payoutId: payout.payoutId,
+        providerPaymentId: payout.providerPaymentId,
+        feeMsat: payout.feeMsat,
+      });
+    } catch (error) {
+      res.status(400).json({ error: errorMessage(error) });
+    }
+  });
+
   app.post("/api/revenue/operator/backup", (req: Request, res: Response) => {
     if (!options.isAdminAuthorized(req)) {
       res.status(401).json({ error: "unauthorized" });
