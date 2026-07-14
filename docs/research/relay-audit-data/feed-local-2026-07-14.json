@@ -1,7 +1,7 @@
 {
   "runId": "feed-local-2026-07-14",
-  "wiredCommit": "5a39300 plus issue-74 scenarios",
-  "wiredAdminCommit": "0bf5f09 plus issue-74 scenarios",
+  "wiredCommit": "d8727f1 plus issue-74 review scenarios and browser terminal-relay fix",
+  "wiredAdminCommit": "9c6c228 plus issue-74 review scenarios",
   "harnessCommit": "05f234a/5c75cf0 contract",
   "environment": "local Node.js test runners with two loopback WebSocket relay fixtures",
   "relayCoverage": "two local configured relay URLs; no public relay connections",
@@ -49,6 +49,7 @@
       "name": "wired-server-feed-snapshot-local-fixture",
       "samples": 20,
       "concurrentRefreshCallersPerRun": 2,
+      "triggerPair": "Vercel cron HTTP handler plus direct/manual refresh",
       "coalescedFetchesPerRun": 1,
       "requiredResultIds": 3,
       "resultIdsResolved": 3,
@@ -79,6 +80,65 @@
       }
     },
     {
+      "name": "wired-browser-missing-root-hint-chunk-local-fixture",
+      "samples": 1,
+      "requiredResultIds": 42,
+      "resultIdsResolved": 42,
+      "configuredActivityRelays": 2,
+      "distinctPreconnectedHintRelays": 1,
+      "rootIdChunkSizesPerRelay": [20, 1],
+      "requests": 50,
+      "closes": 50,
+      "relayEose": 50,
+      "returnedEvents": 63,
+      "relayFanout": 3,
+      "interpretation": "The hint and 20-ID root chunk boundary were honored. The 21 roots each started an individual two-relay reply traversal, accounting for 42 of 50 requests."
+    },
+    {
+      "name": "wired-browser-partial-relay-disconnect",
+      "samples": 1,
+      "before": {
+        "result": "failed to complete within the 5000 ms test deadline",
+        "failure": "sending on closed connection when recursive reply traversal reused the terminal relay"
+      },
+      "after": {
+        "requiredResultIds": 3,
+        "resultIdsResolved": 3,
+        "completionLatencyMs": 30,
+        "requests": 4,
+        "closes": 3,
+        "relayEose": 3,
+        "returnedEvents": 3,
+        "relayFanout": 2
+      }
+    },
+    {
+      "name": "wired-browser-bootstrap-live-reply-overlap-local-fixture",
+      "samples": 1,
+      "requiredReplyIdsPerPath": 2,
+      "liveReplyIdsResolved": 2,
+      "bootstrapReplyIdsResolved": 2,
+      "bootstrapStartDelayMs": 10,
+      "relayEventDelayMs": 15,
+      "relayEoseDelayMs": 20,
+      "requests": 8,
+      "closes": 8,
+      "relayEose": 8,
+      "returnedEvents": 8,
+      "relayFanout": 2,
+      "completionLatencyMs": 59
+    },
+    {
+      "name": "wired-server-referenced-context-metadata-local-fixture",
+      "samples": 1,
+      "requiredResultIds": 2,
+      "resultIdsResolved": 2,
+      "newestProfilesSelected": 2,
+      "competingProfileRelays": 2,
+      "requests": 10,
+      "relayFanout": 2
+    },
+    {
       "name": "wired-server-feed-no-eose-relay-local-fixture",
       "samples": 1,
       "requiredResultIds": 3,
@@ -93,6 +153,7 @@
       "name": "wired-admin-feed-refresh-local-fixture",
       "samples": 20,
       "concurrentRefreshCallersPerRun": 2,
+      "triggerPair": "one-millisecond scheduled interval plus manual refresh",
       "coalescedFetchesPerRun": 1,
       "requiredResultIds": 3,
       "resultIdsResolved": 3,
@@ -121,6 +182,34 @@
         "subscriptionLifetimesMs": [8, 8, 8, 8, 8, 8, 1, 1],
         "requestEoseCloseIdsExactMatch": true
       }
+    },
+    {
+      "name": "wired-admin-incremental-carry-local-fixture",
+      "samples": 1,
+      "freshActivityEvents": 0,
+      "requiredCachedResultIds": 3,
+      "cachedResultIdsRetained": 3
+    },
+    {
+      "name": "wired-admin-referenced-context-metadata-local-fixture",
+      "samples": 1,
+      "requiredResultIds": 2,
+      "resultIdsResolved": 2,
+      "distinctReferenceHintRelays": 1,
+      "newestProfilesSelected": 2,
+      "competingProfileRelays": 2,
+      "requests": 12,
+      "relayFanout": 3
+    },
+    {
+      "name": "wired-admin-feed-no-eose-relay-local-fixture",
+      "samples": 1,
+      "requiredResultIds": 3,
+      "resultIdsResolved": 3,
+      "requests": 8,
+      "relayEose": 4,
+      "clientTimeoutCompletions": 4,
+      "configuredPerPhaseTimeoutMs": 50
     }
   ],
   "interpretation": "Counts and timings describe controlled fixture workflows only. They are not estimates of public relay traffic, hit rates, or production latency."

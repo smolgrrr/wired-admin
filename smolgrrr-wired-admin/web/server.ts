@@ -24,7 +24,10 @@ import {
   isSafeConfessPostcardImageUrl,
 } from "./src/confess-postcard-renderer.js";
 import { createModerationService } from "./src/moderation.js";
-import { createFeedSnapshotService } from "./src/feed-snapshot-service.js";
+import {
+  createFeedSnapshotService,
+  scheduleFeedSnapshotRefresh,
+} from "./src/feed-snapshot-service.js";
 import { registerHttpRoutes } from "./src/http-routes.js";
 import { createRelayGateway } from "./src/relay-gateway.js";
 import { createHttpAccess } from "./src/http-access.js";
@@ -1527,13 +1530,13 @@ void feedSnapshot.refresh().catch(() => {
   if (!feedSnapshot.current()) console.error(feedSnapshot.lastRefreshError() || "initial refresh failed");
 });
 
-if (refreshSeconds > 0) {
-  setInterval(() => {
-    void feedSnapshot.refresh().catch(() => {
-      console.error(feedSnapshot.lastRefreshError() || "scheduled refresh failed");
-    });
-  }, refreshSeconds * 1000).unref();
-}
+scheduleFeedSnapshotRefresh(
+  () => feedSnapshot.refresh(),
+  refreshSeconds,
+  () => {
+    console.error(feedSnapshot.lastRefreshError() || "scheduled refresh failed");
+  },
+);
 
 if (confessXConfig.enabled) {
   void processPendingConfessXMirrors().catch((error) => {

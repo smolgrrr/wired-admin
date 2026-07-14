@@ -511,6 +511,21 @@ function prioritizeRootIds(
   );
 }
 
+export function scheduleFeedSnapshotRefresh(
+  refresh: () => Promise<unknown>,
+  refreshSeconds: number,
+  onError: (error: unknown) => void,
+): { close(): void } | null {
+  if (!Number.isFinite(refreshSeconds) || refreshSeconds <= 0) return null;
+
+  const timer = setInterval(() => {
+    void refresh().catch(onError);
+  }, refreshSeconds * 1_000);
+  timer.unref();
+
+  return { close: () => clearInterval(timer) };
+}
+
 export function createFeedSnapshotService({
   cacheFile,
   refreshSeconds,
