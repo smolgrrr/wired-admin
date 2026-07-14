@@ -38,6 +38,7 @@ const ids = [
     "mediaQueue",
     "mediaActive",
     "mediaLatency",
+    "mediaSearch",
     "mediaVerdicts",
     "mediaOverrides",
     "mediaAudit",
@@ -56,6 +57,7 @@ elements.moderationForm = requireElement("moderationForm");
 elements.refreshSnapshot = requireElement("refreshSnapshot");
 elements.tokenForm = requireElement("tokenForm");
 elements.mediaOverrideForm = requireElement("mediaOverrideForm");
+elements.mediaSearch = requireElement("mediaSearch");
 const ADMIN_TOKEN_STORAGE_KEY = "wiredAdminToken";
 function adminToken() {
     return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY)?.trim() || "";
@@ -169,19 +171,35 @@ function renderMediaAdmin(data) {
     elements.mediaActive.textContent = `${data.status.activeImages} image / ${data.status.activeVideos} video`;
     elements.mediaLatency.textContent = data.status.scanLatencyP95Ms === null
         ? "--"
-        : `${data.status.scanLatencyP95Ms}ms p95`;
+        : `${data.status.scanLatencyP95Ms}ms p95 · queue ${Math.round(data.status.queueAgeMs / 1000)}s`;
     elements.mediaVerdicts.innerHTML = "";
-    for (const verdict of data.verdicts.slice(0, 100)) {
-        const item = activityItem(verdict.checkedAt, `${verdict.status} / ${verdict.mediaType}`, `${verdict.url} · ${verdict.reason}${verdict.sha256 ? ` · sha256:${verdict.sha256}` : ""}`);
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "button";
-        button.textContent = "Re-scan";
-        button.addEventListener("click", () => requestRescan(verdict.url));
-        item.append(button);
-        elements.mediaVerdicts.append(item);
+    const query = elements.mediaSearch.value.trim().toLowerCase();
+    const matchingVerdicts = data.verdicts.filter((verdict) => !query || verdict.url.toLowerCase().includes(query) || verdict.sha256?.includes(query));
+    const groups = [
+        ["likely violations", matchingVerdicts.filter((item) => item.status === "blocked")],
+        ["review required", matchingVerdicts.filter((item) => item.status === "review-required")],
+        ["detector unavailable", matchingVerdicts.filter((item) => item.status === "unavailable")],
+        ["allowed", matchingVerdicts.filter((item) => item.status === "allowed")],
+    ];
+    if (data.jobs.length > 0) {
+        elements.mediaVerdicts.append(activityItem(Date.now(), "pending analysis", `${data.jobs.length} queued or active`));
     }
-    if (!data.verdicts.length) {
+    for (const [label, verdicts] of groups) {
+        if (verdicts.length === 0)
+            continue;
+        elements.mediaVerdicts.append(activityItem(Date.now(), label, `${verdicts.length} verdicts`));
+        for (const verdict of verdicts.slice(0, 100)) {
+            const item = activityItem(verdict.checkedAt, `${verdict.status} / ${verdict.mediaType}`, `${verdict.url} · ${verdict.reason}${verdict.sha256 ? ` · sha256:${verdict.sha256}` : ""}`);
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "button";
+            button.textContent = "Re-scan";
+            button.addEventListener("click", () => requestRescan(verdict.url));
+            item.append(button);
+            elements.mediaVerdicts.append(item);
+        }
+    }
+    if (!data.jobs.length && !matchingVerdicts.length) {
         elements.mediaVerdicts.append(activityItem(Date.now(), "empty", "no media verdicts"));
     }
     elements.mediaOverrides.innerHTML = "";
@@ -203,6 +221,7 @@ function renderMediaAdmin(data) {
         elements.mediaAudit.append(activityItem(entry.at, `${entry.action} / ${entry.actor}`, entry.target));
     }
 }
+let latestMediaAdmin = null;
 async function fetchMediaAdmin() {
     const response = await fetch("/api/media-moderation/admin", {
         cache: "no-store",
@@ -213,7 +232,8 @@ async function fetchMediaAdmin() {
             response.status === 401 ? "Enter the admin token to review media." : `HTTP ${response.status}`;
         return;
     }
-    renderMediaAdmin((await response.json()));
+    latestMediaAdmin = (await response.json());
+    renderMediaAdmin(latestMediaAdmin);
 }
 async function requestRescan(url) {
     const response = await fetch("/api/media-moderation/rescan", {
@@ -364,6 +384,10 @@ setupTabs();
 setupModerationForm();
 setupMediaOverrideForm();
 elements.refreshSnapshot.addEventListener("click", refreshSnapshot);
+elements.mediaSearch.addEventListener("input", () => {
+    if (latestMediaAdmin)
+        renderMediaAdmin(latestMediaAdmin);
+});
 refresh();
 fetchActions();
 fetchMediaAdmin();

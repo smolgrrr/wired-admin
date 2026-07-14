@@ -93,6 +93,11 @@ async function defaultTransport({
       (response) => {
         const chunks: Buffer[] = [];
         let received = 0;
+        const contentLength = Number(response.headers["content-length"] || 0);
+        if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+          response.destroy(new Error("media exceeds byte limit"));
+          return;
+        }
         response.on("data", (chunk: Buffer) => {
           received += chunk.length;
           if (received > maxBytes) {
@@ -102,6 +107,7 @@ async function defaultTransport({
           chunks.push(chunk);
         });
         response.on("end", () => {
+          clearTimeout(deadline);
           resolve({
             status: response.statusCode ?? 502,
             bytes: Buffer.concat(chunks),
@@ -114,11 +120,21 @@ async function defaultTransport({
               : {}),
           });
         });
-        response.on("error", reject);
+        response.on("error", (error) => {
+          clearTimeout(deadline);
+          reject(error);
+        });
       },
     );
+    const deadline = setTimeout(
+      () => request.destroy(new Error("media fetch timed out")),
+      timeoutMs,
+    );
     request.on("timeout", () => request.destroy(new Error("media fetch timed out")));
-    request.on("error", reject);
+    request.on("error", (error) => {
+      clearTimeout(deadline);
+      reject(error);
+    });
     request.end();
   });
 }

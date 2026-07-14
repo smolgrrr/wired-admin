@@ -225,7 +225,7 @@ export function createMediaModerationStore(storeFile: string) {
     delete data.verdictsByUrl[url];
     if (verdict.sha256) delete data.verdictsByHash[verdict.sha256.toLowerCase()];
     const job: StoredMediaJob = {
-      id: `${verdict.eventId}:${verdict.url}`,
+      id: verdict.url,
       eventId: verdict.eventId,
       url: verdict.url,
       mediaType: verdict.mediaType,

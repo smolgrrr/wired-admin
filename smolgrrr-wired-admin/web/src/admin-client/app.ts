@@ -47,6 +47,7 @@ const ids = [
   "mediaQueue",
   "mediaActive",
   "mediaLatency",
+  "mediaSearch",
   "mediaVerdicts",
   "mediaOverrides",
   "mediaAudit",
@@ -62,6 +63,7 @@ type AdminElements = Record<ElementId, HTMLElement> & {
   refreshSnapshot: HTMLButtonElement;
   tokenForm: HTMLFormElement;
   mediaOverrideForm: HTMLFormElement;
+  mediaSearch: HTMLInputElement;
 };
 
 function requireElement<T extends HTMLElement = HTMLElement>(id: ElementId): T {
@@ -76,6 +78,7 @@ elements.moderationForm = requireElement<HTMLFormElement>("moderationForm");
 elements.refreshSnapshot = requireElement<HTMLButtonElement>("refreshSnapshot");
 elements.tokenForm = requireElement<HTMLFormElement>("tokenForm");
 elements.mediaOverrideForm = requireElement<HTMLFormElement>("mediaOverrideForm");
+elements.mediaSearch = requireElement<HTMLInputElement>("mediaSearch");
 
 const ADMIN_TOKEN_STORAGE_KEY = "wiredAdminToken";
 
@@ -210,10 +213,26 @@ function renderMediaAdmin(data: MediaModerationAdminState): void {
   elements.mediaActive.textContent = `${data.status.activeImages} image / ${data.status.activeVideos} video`;
   elements.mediaLatency.textContent = data.status.scanLatencyP95Ms === null
     ? "--"
-    : `${data.status.scanLatencyP95Ms}ms p95`;
+    : `${data.status.scanLatencyP95Ms}ms p95 · queue ${Math.round(data.status.queueAgeMs / 1000)}s`;
 
   elements.mediaVerdicts.innerHTML = "";
-  for (const verdict of data.verdicts.slice(0, 100)) {
+  const query = elements.mediaSearch.value.trim().toLowerCase();
+  const matchingVerdicts = data.verdicts.filter((verdict) =>
+    !query || verdict.url.toLowerCase().includes(query) || verdict.sha256?.includes(query),
+  );
+  const groups = [
+    ["likely violations", matchingVerdicts.filter((item) => item.status === "blocked")],
+    ["review required", matchingVerdicts.filter((item) => item.status === "review-required")],
+    ["detector unavailable", matchingVerdicts.filter((item) => item.status === "unavailable")],
+    ["allowed", matchingVerdicts.filter((item) => item.status === "allowed")],
+  ] as const;
+  if (data.jobs.length > 0) {
+    elements.mediaVerdicts.append(activityItem(Date.now(), "pending analysis", `${data.jobs.length} queued or active`));
+  }
+  for (const [label, verdicts] of groups) {
+    if (verdicts.length === 0) continue;
+    elements.mediaVerdicts.append(activityItem(Date.now(), label, `${verdicts.length} verdicts`));
+    for (const verdict of verdicts.slice(0, 100)) {
     const item = activityItem(
       verdict.checkedAt,
       `${verdict.status} / ${verdict.mediaType}`,
@@ -226,8 +245,9 @@ function renderMediaAdmin(data: MediaModerationAdminState): void {
     button.addEventListener("click", () => requestRescan(verdict.url));
     item.append(button);
     elements.mediaVerdicts.append(item);
+    }
   }
-  if (!data.verdicts.length) {
+  if (!data.jobs.length && !matchingVerdicts.length) {
     elements.mediaVerdicts.append(activityItem(Date.now(), "empty", "no media verdicts"));
   }
 
@@ -258,6 +278,8 @@ function renderMediaAdmin(data: MediaModerationAdminState): void {
   }
 }
 
+let latestMediaAdmin: MediaModerationAdminState | null = null;
+
 async function fetchMediaAdmin(): Promise<void> {
   const response = await fetch("/api/media-moderation/admin", {
     cache: "no-store",
@@ -268,7 +290,8 @@ async function fetchMediaAdmin(): Promise<void> {
       response.status === 401 ? "Enter the admin token to review media." : `HTTP ${response.status}`;
     return;
   }
-  renderMediaAdmin((await response.json()) as MediaModerationAdminState);
+  latestMediaAdmin = (await response.json()) as MediaModerationAdminState;
+  renderMediaAdmin(latestMediaAdmin);
 }
 
 async function requestRescan(url: string): Promise<void> {
@@ -429,6 +452,9 @@ setupTabs();
 setupModerationForm();
 setupMediaOverrideForm();
 elements.refreshSnapshot.addEventListener("click", refreshSnapshot);
+elements.mediaSearch.addEventListener("input", () => {
+  if (latestMediaAdmin) renderMediaAdmin(latestMediaAdmin);
+});
 
 refresh();
 fetchActions();

@@ -57,6 +57,9 @@ export function createMediaModerationService({
   const imageConcurrency = 10;
   const videoConcurrency = 2;
   const scanDurations: number[] = [];
+  const imageScanDurations: number[] = [];
+  const videoScanDurations: number[] = [];
+  const batchDurations: number[] = [];
   const metrics = {
     batches: 0,
     requestedAttachments: 0,
@@ -70,8 +73,8 @@ export function createMediaModerationService({
     for (const job of store.jobs()) queueExistingJob(job);
   });
 
-  function jobId(eventId: string, url: string): string {
-    return `${eventId}:${url}`;
+  function jobId(url: string): string {
+    return url;
   }
 
   function verdictFromStored(
@@ -106,7 +109,7 @@ export function createMediaModerationService({
   }
 
   async function enqueue(item: MediaVerdictRequest, url: string): Promise<void> {
-    const id = jobId(item.event.id, url);
+    const id = jobId(url);
     if (queuedJobIds.has(id)) return;
     const job: StoredMediaJob = {
       id,
@@ -131,6 +134,24 @@ export function createMediaModerationService({
         mediaType: job.mediaType,
         url: job.url,
         ...(job.claimedHash ? { claimedHash: job.claimedHash } : {}),
+        lookupVerifiedHash(hash) {
+          const cached = store.getByHash(hash);
+          if (
+            !cached ||
+            cached.expiresAt <= Date.now() ||
+            cached.detectorVersion !== analyzer.version
+          ) {
+            return null;
+          }
+          metrics.cacheHits += 1;
+          return {
+            sha256: hash,
+            perceptualHash: cached.perceptualHash || "0000000000000000",
+            signals: cached.signals,
+            status: cached.status,
+            reason: cached.reason,
+          };
+        },
       });
       await store.completeJob(job.id, {
         eventId: job.eventId,
@@ -163,6 +184,11 @@ export function createMediaModerationService({
     } finally {
       scanDurations.push(Date.now() - checkedAt);
       if (scanDurations.length > 200) scanDurations.shift();
+      const mediaDurations = job.mediaType === "video"
+        ? videoScanDurations
+        : imageScanDurations;
+      mediaDurations.push(Date.now() - checkedAt);
+      if (mediaDurations.length > 200) mediaDurations.shift();
       queuedJobIds.delete(job.id);
     }
   }
@@ -223,19 +249,6 @@ export function createMediaModerationService({
       };
     }
 
-    const now = Date.now();
-    const stored = store.getByUrl(url);
-    if (stored && stored.expiresAt > now) {
-      metrics.cacheHits += 1;
-      return verdictFromStored(item, stored);
-    }
-    const claimedHash = item.claimedHash?.toLowerCase();
-    const hashVerdict = claimedHash ? store.getByHash(claimedHash) : null;
-    if (hashVerdict && hashVerdict.expiresAt > now) {
-      metrics.cacheHits += 1;
-      return verdictFromStored(item, { ...hashVerdict, eventId: item.event.id, url });
-    }
-
     const manifest = await moderation.getManifest();
     if (manifest.blockedMediaUrls.includes(url)) {
       return {
@@ -260,6 +273,13 @@ export function createMediaModerationService({
       };
     }
 
+    const now = Date.now();
+    const stored = store.getByUrl(url);
+    if (stored && stored.expiresAt > now) {
+      metrics.cacheHits += 1;
+      return verdictFromStored(item, stored);
+    }
+
     await enqueue(item, url);
     return {
       requestId: item.requestId,
@@ -276,13 +296,19 @@ export function createMediaModerationService({
     items: MediaVerdictRequest[],
   ): Promise<MediaVerdictBatchResponse> {
     await ready;
+    const startedAt = Date.now();
     metrics.batches += 1;
     metrics.requestedAttachments += items.length;
-    return {
-      mode,
-      policyVersion: POLICY_VERSION,
-      verdicts: await Promise.all(items.map(verdictFor)),
-    };
+    try {
+      return {
+        mode,
+        policyVersion: POLICY_VERSION,
+        verdicts: await Promise.all(items.map(verdictFor)),
+      };
+    } finally {
+      batchDurations.push(Date.now() - startedAt);
+      if (batchDurations.length > 500) batchDurations.shift();
+    }
   }
 
   async function close(): Promise<void> {
@@ -336,14 +362,22 @@ export function createMediaModerationService({
     return {
       status: status(),
       verdicts: store.verdicts(),
+      jobs: store.jobs(),
       overrides: store.overrides(),
       audit: store.auditEntries(),
     };
   }
 
   function status() {
-    const sorted = [...scanDurations].sort((left, right) => left - right);
-    const p95Index = Math.max(0, Math.ceil(sorted.length * 0.95) - 1);
+    const p95 = (values: number[]): number | null => {
+      const sorted = [...values].sort((left, right) => left - right);
+      const index = Math.max(0, Math.ceil(sorted.length * 0.95) - 1);
+      return sorted[index] ?? null;
+    };
+    const oldestJobAt = store.jobs().reduce(
+      (oldest, job) => Math.min(oldest, job.createdAt),
+      Number.POSITIVE_INFINITY,
+    );
     return {
       mode,
       policyVersion: POLICY_VERSION,
@@ -353,7 +387,14 @@ export function createMediaModerationService({
       activeVideos,
       imageConcurrency,
       videoConcurrency,
-      scanLatencyP95Ms: sorted[p95Index] ?? null,
+      batchLatencyP95Ms: p95(batchDurations),
+      scanLatencyP95Ms: p95(scanDurations),
+      imageScanLatencyP95Ms: p95(imageScanDurations),
+      videoScanLatencyP95Ms: p95(videoScanDurations),
+      queueAgeMs: Number.isFinite(oldestJobAt) ? Date.now() - oldestJobAt : 0,
+      overrideCount: store.overrides().length,
+      enforcementAttachments:
+        mode === "enforce" ? metrics.requestedAttachments : 0,
       ...metrics,
     };
   }

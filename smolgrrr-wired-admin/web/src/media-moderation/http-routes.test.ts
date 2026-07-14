@@ -226,6 +226,154 @@ test("an uncached verdict becomes content-bound and survives a service restart",
   }
 });
 
+test("a claimed hash never reuses a cached allow before byte verification", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-media-claims-"));
+  const moderation = createModerationService(path.join(directory, "moderation.json"));
+  const firstUrl = "https://cdn.example.com/first.jpg";
+  const secondUrl = "https://cdn.example.com/unverified.jpg";
+  const makeEvent = (url: string, seed: number) => finalizeEvent({
+    kind: 1,
+    created_at: 1_700_000_010 + seed,
+    tags: [["imeta", `url ${url}`, "m image/jpeg"]],
+    content: url,
+  }, new Uint8Array(32).fill(seed));
+  let analyses = 0;
+  const service = createMediaModerationService({
+    mode: "enforce",
+    moderation,
+    storeFile: path.join(directory, "media.json"),
+    analyzer: {
+      version: "claim-test-v1",
+      async analyze(input) {
+        analyses += 1;
+        return {
+          sha256: analyses === 1 ? "d".repeat(64) : "e".repeat(64),
+          perceptualHash: "0123456789abcdef",
+          signals: [],
+          status: analyses === 1 ? "allowed" : "review-required",
+          reason: analyses === 1 ? "policy_allowed" : "claimed_hash_mismatch",
+        };
+      },
+    },
+  });
+  try {
+    const first = {
+      requestId: "first",
+      event: makeEvent(firstUrl, 10),
+      mediaType: "image" as const,
+      url: firstUrl,
+    };
+    await service.getVerdicts([first]);
+    await service.waitForIdle();
+    const claimed = {
+      requestId: "claimed",
+      event: makeEvent(secondUrl, 11),
+      mediaType: "image" as const,
+      url: secondUrl,
+      claimedHash: "d".repeat(64),
+    };
+    assert.equal((await service.getVerdicts([claimed])).verdicts[0]?.status, "pending");
+    await service.waitForIdle();
+    assert.equal(analyses, 2);
+    assert.equal((await service.getVerdicts([claimed])).verdicts[0]?.status, "review-required");
+  } finally {
+    await service.close();
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("a new manual URL block takes precedence over a cached allow", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-media-precedence-"));
+  const moderation = createModerationService(path.join(directory, "moderation.json"));
+  const url = "https://cdn.example.com/changed-rule.jpg";
+  const event = finalizeEvent({
+    kind: 1,
+    created_at: 1_700_000_020,
+    tags: [["imeta", `url ${url}`, "m image/jpeg"]],
+    content: url,
+  }, new Uint8Array(32).fill(12));
+  const service = createMediaModerationService({
+    mode: "enforce",
+    moderation,
+    storeFile: path.join(directory, "media.json"),
+    analyzer: {
+      version: "precedence-v1",
+      async analyze() {
+        return {
+          sha256: "f".repeat(64),
+          perceptualHash: "0123456789abcdef",
+          signals: [],
+          status: "allowed",
+          reason: "policy_allowed",
+        };
+      },
+    },
+  });
+  const item = { requestId: "rule", event, mediaType: "image" as const, url };
+  try {
+    await service.getVerdicts([item]);
+    await service.waitForIdle();
+    assert.equal((await service.getVerdicts([item])).verdicts[0]?.status, "allowed");
+    await moderation.createAction({
+      kind: "block_media_url",
+      value: url,
+      reason: "manual",
+      moderator: "test-admin",
+    });
+    assert.equal((await service.getVerdicts([item])).verdicts[0]?.status, "blocked");
+    assert.equal((await service.getVerdicts([item])).verdicts[0]?.reason, "manual_url_block");
+  } finally {
+    await service.close();
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("the same URL in different events shares one in-flight analysis", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "wired-media-dedupe-"));
+  const moderation = createModerationService(path.join(directory, "moderation.json"));
+  const url = "https://cdn.example.com/shared.jpg";
+  const makeEvent = (seed: number) => finalizeEvent({
+    kind: 1,
+    created_at: 1_700_000_030 + seed,
+    tags: [["imeta", `url ${url}`, "m image/jpeg"]],
+    content: url,
+  }, new Uint8Array(32).fill(seed));
+  let analyses = 0;
+  const service = createMediaModerationService({
+    mode: "enforce",
+    moderation,
+    storeFile: path.join(directory, "media.json"),
+    analyzer: {
+      version: "dedupe-v1",
+      async analyze() {
+        analyses += 1;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          sha256: "1".repeat(64),
+          perceptualHash: "0123456789abcdef",
+          signals: [],
+          status: "allowed",
+          reason: "policy_allowed",
+        };
+      },
+    },
+  });
+  try {
+    const response = await service.getVerdicts([13, 14].map((seed) => ({
+      requestId: `shared-${seed}`,
+      event: makeEvent(seed),
+      mediaType: "image" as const,
+      url,
+    })));
+    assert.deepEqual(response.verdicts.map((verdict) => verdict.status), ["pending", "pending"]);
+    await service.waitForIdle();
+    assert.equal(analyses, 1);
+  } finally {
+    await service.close();
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
 test("an authorized audited allow override reverses an automatic block", async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "wired-media-override-"));
   const moderation = createModerationService(path.join(temporaryDirectory, "moderation.json"));
@@ -248,7 +396,7 @@ test("an authorized audited allow override reverses an automatic block", async (
           perceptualHash: "fedcba9876543210",
           signals: [{ category: "Porn", confidence: 0.99, source: "model" }],
           status: "blocked",
-          reason: "explicit_media_policy",
+          reason: "configured_hash_block",
         };
       },
     },

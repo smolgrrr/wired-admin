@@ -60,6 +60,9 @@ export type MediaAnalyzer = {
     mediaType: ModeratedMediaType;
     url: string;
     claimedHash?: string;
+    lookupVerifiedHash?: (
+      sha256: string,
+    ) => Promise<MediaAnalysisResult | null> | MediaAnalysisResult | null;
   }): Promise<MediaAnalysisResult>;
   close?: () => Promise<void> | void;
 };

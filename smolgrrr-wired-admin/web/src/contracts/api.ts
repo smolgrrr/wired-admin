@@ -75,11 +75,24 @@ export type MediaModerationAdminState = {
     queueDepth: number;
     activeImages: number;
     activeVideos: number;
+    batchLatencyP95Ms: number | null;
     scanLatencyP95Ms: number | null;
+    imageScanLatencyP95Ms: number | null;
+    videoScanLatencyP95Ms: number | null;
+    queueAgeMs: number;
+    overrideCount: number;
+    cacheHits: number;
     completed: number;
     blocked: number;
     errors: number;
   };
+  jobs: Array<{
+    id: string;
+    eventId: string;
+    url: string;
+    mediaType: "image" | "video";
+    createdAt: number;
+  }>;
   verdicts: Array<{
     eventId: string;
     url: string;

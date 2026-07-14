@@ -44,8 +44,8 @@ export function createTransientMediaAnalyzer({
         sha256: contentHash,
         perceptualHash,
         signals,
-        status: "blocked" as const,
-        reason: "explicit_media_policy",
+        status: "review-required" as const,
+        reason: "model_high_confidence_review",
       };
     }
     if (highestExplicit >= reviewThreshold || sexy >= reviewThreshold) {
@@ -83,6 +83,7 @@ export function createTransientMediaAnalyzer({
     mediaType,
     url,
     claimedHash,
+    lookupVerifiedHash,
   }: Parameters<MediaAnalyzer["analyze"]>[0]) {
     const fetched = await fetcher(url);
     const contentHash = sha256(fetched.bytes);
@@ -144,6 +145,9 @@ export function createTransientMediaAnalyzer({
         reason: "perceptual_hash_block",
       };
     }
+
+    const cached = await lookupVerifiedHash?.(contentHash);
+    if (cached) return cached;
 
     const signals = aggregateSignals(
       await Promise.all(frames.map((frame) => classifier.classify(frame))),

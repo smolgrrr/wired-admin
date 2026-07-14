@@ -36,8 +36,8 @@ test("transient image analysis computes hashes and maps local model signals", as
 
   assert.equal(result.sha256, crypto.createHash("sha256").update(bytes).digest("hex"));
   assert.match(result.perceptualHash, /^[0-9a-f]{16}$/);
-  assert.equal(result.status, "blocked");
-  assert.equal(result.reason, "explicit_media_policy");
+  assert.equal(result.status, "review-required");
+  assert.equal(result.reason, "model_high_confidence_review");
   assert.equal(result.signals[0]?.category, "Porn");
 });
 
@@ -130,6 +130,45 @@ test("a nearby local perceptual hash blocks without running model inference", as
   assert.equal(classifications, 0);
 });
 
+test("a content-hash cache is consulted only after fetched bytes are hashed", async () => {
+  const bytes = await sharp({
+    create: { width: 20, height: 20, channels: 3, background: "#654321" },
+  }).png().toBuffer();
+  const contentHash = crypto.createHash("sha256").update(bytes).digest("hex");
+  let classifications = 0;
+  let lookedUp = "";
+  const analyzer = createTransientMediaAnalyzer({
+    fetcher: async () => ({ bytes, contentType: "image/png" }),
+    classifier: {
+      version: "must-not-run",
+      async classify() {
+        classifications += 1;
+        return [];
+      },
+    },
+  });
+
+  const result = await analyzer.analyze({
+    eventId: "5".repeat(64),
+    mediaType: "image",
+    url: "https://cdn.example.com/hash-alias.png",
+    lookupVerifiedHash(hash) {
+      lookedUp = hash;
+      return {
+        sha256: hash,
+        perceptualHash: "0123456789abcdef",
+        signals: [],
+        status: "allowed",
+        reason: "verified_hash_cache",
+      };
+    },
+  });
+
+  assert.equal(lookedUp, contentHash);
+  assert.equal(result.reason, "verified_hash_cache");
+  assert.equal(classifications, 0);
+});
+
 test("remote fetching rejects private destinations before transport", async () => {
   let transportCalls = 0;
   await assert.rejects(
@@ -201,7 +240,7 @@ test("bundled local inference classifies an image without a network model fetch"
   }
 });
 
-test("video analysis blocks when a later representative frame crosses policy", async () => {
+test("video analysis requires review when a later representative frame crosses policy", async () => {
   const frameOne = await sharp({
     create: { width: 32, height: 18, channels: 3, background: "#ffffff" },
   }).jpeg().toBuffer();
@@ -230,7 +269,7 @@ test("video analysis blocks when a later representative frame crosses policy", a
   });
 
   assert.equal(classifications, 2);
-  assert.equal(result.status, "blocked");
-  assert.equal(result.reason, "explicit_media_policy");
+  assert.equal(result.status, "review-required");
+  assert.equal(result.reason, "model_high_confidence_review");
   assert.equal(result.sha256, crypto.createHash("sha256").update("fake-video").digest("hex"));
 });

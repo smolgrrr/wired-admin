@@ -56,8 +56,9 @@ Runtime environment:
 - `MEDIA_MODERATION_MODE`: `off` (default), `shadow`, or `enforce`. Shadow mode
   evaluates and records decisions without asking clients to hide media.
 - `MEDIA_MODERATION_STORE_FILE`: persistent JSON store path.
-- `MEDIA_MODERATION_BLOCK_THRESHOLD`: Porn/Hentai block threshold, default
-  `0.92`.
+- `MEDIA_MODERATION_BLOCK_THRESHOLD`: Porn/Hentai high-confidence review
+  threshold, default `0.92`. Local model output alone never makes a legal or
+  whole-note block decision.
 - `MEDIA_MODERATION_REVIEW_THRESHOLD`: Porn/Hentai/Sexy review threshold,
   default `0.65`. Review-required media remains covered in enforcement mode.
 - `MEDIA_MODERATION_BLOCK_SHA256`: comma-separated local exact block hashes.
