@@ -1,0 +1,62 @@
+{
+  "runId": "thread-local-2026-07-14",
+  "applicationCommit": "05f234a",
+  "harnessCommit": "05f234a",
+  "environment": "local Node.js/Vitest with two loopback WebSocket relay fixtures",
+  "relayCoverage": "two local relay URLs; no public relay connections",
+  "startedAt": "2026-07-14T22:50:15Z",
+  "sampleSizePerNormalScenario": 20,
+  "scenarios": [
+    {
+      "name": "thread-navigation-local-fixture",
+      "requiredResultIds": 3,
+      "resultIdsResolved": 3,
+      "perRun": {
+        "requests": 8,
+        "closes": 8,
+        "returnedEvents": 12,
+        "uniqueReturnedEventIds": 3,
+        "repeatedOperations": 4,
+        "relayFanout": 2,
+        "connectionReuseCount": 6
+      },
+      "completionLatencyMs": {
+        "p50": 26,
+        "p95": 30,
+        "samples": [41, 30, 28, 29, 26, 27, 26, 25, 26, 26, 25, 28, 27, 26, 25, 27, 27, 26, 29, 26]
+      }
+    },
+    {
+      "name": "thread-preview-local-fixture",
+      "requiredResultIds": 3,
+      "resultIdsResolved": 3,
+      "perRun": {
+        "openedConnections": 2,
+        "closedConnections": 2,
+        "requests": 2,
+        "closes": 2,
+        "returnedEvents": 6,
+        "uniqueReturnedEventIds": 3,
+        "repeatedOperations": 1,
+        "relayFanout": 2
+      },
+      "completionLatencyMs": {
+        "p50": 27,
+        "p95": 33,
+        "samples": [59, 33, 33, 30, 30, 27, 27, 27, 28, 27, 27, 28, 28, 26, 26, 27, 26, 27, 27, 26]
+      }
+    },
+    {
+      "name": "thread-preview-degraded-relay-local-fixture",
+      "sampleSize": 1,
+      "requiredResultIds": 3,
+      "resultIdsResolved": 3,
+      "requests": 2,
+      "returnedEvents": 3,
+      "relayEose": 1,
+      "relayDisconnectedBeforeEose": 1,
+      "completionLatencyMs": 2504,
+      "interpretation": "The exact value is the configured application fallback timer, not an estimate of public relay latency."
+    }
+  ]
+}
