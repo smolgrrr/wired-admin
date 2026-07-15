@@ -132,5 +132,37 @@
       }
     }
   ],
+  "implementedImprovements": [
+    {
+      "name": "notification-kind-7-removal",
+      "displayedResultIdsBefore": 2,
+      "displayedResultIdsAfter": 2,
+      "requestsBefore": 4,
+      "requestsAfter": 4,
+      "returnedEventsBefore": 8,
+      "returnedEventsAfter": 6,
+      "authoredRequestBytesBefore": 121,
+      "authoredRequestBytesAfter": 119,
+      "completionP95MsBefore": 42,
+      "completionP95MsAfter": 39,
+      "relayFanoutBefore": 2,
+      "relayFanoutAfter": 2
+    },
+    {
+      "name": "single-query-per-extra-quote-hint",
+      "resolvedResultIdsBefore": 2,
+      "resolvedResultIdsAfter": 2,
+      "requestsBefore": 6,
+      "requestsAfter": 5,
+      "returnedEventsBefore": 4,
+      "returnedEventsAfter": 3,
+      "hintRequestsBefore": 2,
+      "hintRequestsAfter": 1,
+      "completionP95MsBefore": 27,
+      "completionP95MsAfter": 23,
+      "relayFanoutBefore": 3,
+      "relayFanoutAfter": 3
+    }
+  ],
   "interpretation": "Counts and timings describe controlled fixture workflows only. They are not estimates of public relay traffic, cache hit rates, notification volume, or production latency."
 }
