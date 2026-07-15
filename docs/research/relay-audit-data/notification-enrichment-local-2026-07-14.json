@@ -5,6 +5,8 @@
   "harnessCommit": "05f234a/5c75cf0 contract",
   "environment": "local Node.js test runners with loopback WebSocket relay fixtures",
   "relayCoverage": "injected loopback relay URLs only; no public relay connections",
+  "startedAt": "2026-07-14T23:51:34Z",
+  "endedAt": "2026-07-15T00:02:29Z",
   "scenarios": [
     {
       "name": "wired-browser-notifications-local-fixture",
@@ -50,8 +52,8 @@
       "relayFanout": 2
     },
     {
-      "name": "wired-browser-profiles-batched-newest-inputs",
-      "samples": 1,
+      "name": "wired-browser-profiles-local-fixture",
+      "samples": 20,
       "requiredPubkeys": 2,
       "pubkeysResolved": 2,
       "newestProfilesSelected": 2,
@@ -60,7 +62,17 @@
       "relayEose": 2,
       "returnedEvents": 4,
       "relayFanout": 2,
-      "filter": "authors-2 kind-0 limit-2"
+      "filter": "authors-2 kind-0 limit-2",
+      "completionLatencyMs": {
+        "p50": 34,
+        "p95": 34,
+        "samples": [38, 33, 33, 34, 34, 34, 33, 32, 34, 34, 33, 34, 34, 33, 34, 33, 33, 34, 34, 34]
+      },
+      "protocolEvidenceSample": {
+        "requestBytes": [186, 186],
+        "returnedEventBytes": [383, 383, 383, 383],
+        "subscriptionLifetimesMs": [34, 24]
+      }
     },
     {
       "name": "wired-browser-profile-consumer-overlap",
@@ -88,14 +100,24 @@
       "hintedEoseDelayMs": 25
     },
     {
-      "name": "wired-browser-quote-preconnected-hint-duplicate",
-      "samples": 1,
-      "requiredRefIds": 1,
-      "resolvedRefIds": 1,
-      "requests": 3,
-      "returnedEvents": 2,
+      "name": "wired-browser-quotes-local-fixture",
+      "samples": 20,
+      "requiredRefIds": 2,
+      "resolvedRefIds": 2,
+      "requests": 6,
+      "returnedEvents": 4,
       "hintRelayRequestsForSameFilter": 2,
-      "relayFanout": 2
+      "relayFanout": 3,
+      "completionLatencyMs": {
+        "p50": 24,
+        "p95": 27,
+        "samples": [25, 26, 24, 23, 24, 23, 23, 27, 24, 24, 24, 27, 30, 25, 27, 25, 26, 23, 24, 23]
+      },
+      "protocolEvidenceSample": {
+        "requestBytes": [120, 120, 120, 120, 120, 120],
+        "returnedEventBytes": [382, 382, 386, 386],
+        "subscriptionLifetimesMs": [14, 14, 15, 15, 22, 22]
+      }
     },
     {
       "name": "wired-browser-one-shot-context-reused-from-thread-audit",
