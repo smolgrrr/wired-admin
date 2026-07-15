@@ -2,7 +2,7 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache font-dejavu
+RUN apk add --no-cache ffmpeg font-dejavu
 
 COPY package.json package-lock.json* ./
 RUN npm install
