@@ -1,0 +1,84 @@
+{
+  "runId": "publishing-before-local-2026-07-15",
+  "wiredCommit": "bc106d4 plus audit test",
+  "wiredAdminCommit": "f2768ac plus audit tests",
+  "environment": "local Node.js test runners with loopback WebSocket relay fixtures",
+  "startedAt": "2026-07-15T00:17:16Z",
+  "endedAt": "2026-07-15T00:17:22Z",
+  "instrumentationRevision": {
+    "wiredRelayHarnessSha256": "234e47765254af99b6405cb0d7654599638b82d5b70c3e6cd37f84ddd755b49f",
+    "wiredPublishAuditSource": "src/nostr/testing/publish-transcript.test.ts",
+    "wiredPublishAuditSha256": "39d68b1963113a5b9517af5a9c026dc6658a1fbb352708328d24de35470139da",
+    "adminRelayHarnessSha256": "94d1408951ee0fb829852e28445104dbea11d86fe416b189c58a0fc17151f38c",
+    "adminPublishAuditSource": "smolgrrr-wired-admin/web/src/testing/relay-transcript.test.ts",
+    "adminPublishAuditSha256": "b0da44635b25c6863aea6e9c4b4548006df3314521ff54b90836a5686e6e64af"
+  },
+  "relayCoverage": "browser: three preconnected loopback relays for partial acceptance and two for failure/duplicate cases; admin: up to three fresh loopback relay connections per invocation; gateway: one loopback backend; no public relay connections",
+  "fixtureProvenance": "deterministic nostr-tools finalized events, loopback ws servers, explicit ACK/reject/delay/disconnect controllers",
+  "publicRelaysContacted": false,
+  "scenarios": [
+    {
+      "name": "wired-browser-publish-partial-local-fixture",
+      "samples": 20,
+      "perRun": { "publishes": 3, "acceptedAcknowledgements": 2, "rejections": 1, "relayFanout": 3, "openedConnectionsDuringWorkflow": 0 },
+      "completionLatencyMs": { "p50": 8, "p95": 9, "samples": [11, 8, 7, 8, 7, 7, 8, 8, 7, 8, 7, 7, 8, 8, 8, 8, 9, 8, 9, 8] },
+      "publishedEventBytes": [378, 378, 378]
+    },
+    {
+      "name": "wired-browser-publish-duplicate-invocation",
+      "samples": 1,
+      "result": "four acknowledgements arrived but both callers did not settle within 50ms",
+      "perRun": { "publishes": 4, "acceptedAcknowledgements": 4, "relayFanout": 2 }
+    },
+    {
+      "name": "wired-browser-publish-full-reject-disconnect",
+      "samples": 1,
+      "perRun": { "publishes": 2, "acceptedAcknowledgements": 0, "rejections": 1, "disconnects": 1, "retries": 0, "relayFanout": 2 },
+      "acceptedRelays": [],
+      "userCompletion": "failed; no signed event exposed and draft reported not posted by owner contract"
+    },
+    {
+      "name": "wired-browser-publish-silent-relay",
+      "samples": 1,
+      "perRun": { "publishes": 2, "acceptedAcknowledgements": 1, "rejections": 0, "retries": 0, "relayFanout": 2 },
+      "pendingAfterMs": 50,
+      "completionTrigger": "silent relay disconnect",
+      "acceptedRelayCount": 1,
+      "userCompletion": "compose remains publishing until aggregate publish settles"
+    },
+    {
+      "name": "wired-admin-publish-partial-local-fixture",
+      "samples": 20,
+      "perRun": { "openedConnections": 3, "closedConnections": 3, "publishes": 3, "acceptedAcknowledgements": 2, "rejections": 1, "relayFanout": 3 },
+      "completionLatencyMs": { "p50": 14, "p95": 23, "samples": [25, 23, 21, 16, 15, 16, 14, 14, 15, 14, 17, 13, 14, 14, 16, 13, 12, 12, 13, 14] },
+      "publishedEventBytes": [370, 370, 370]
+    },
+    {
+      "name": "wired-admin-publish-duplicate-normalized-target",
+      "samples": 1,
+      "perRun": { "openedConnections": 3, "publishes": 3, "acceptedAcknowledgements": 3, "relayFanout": 1 },
+      "note": "two normalized-equivalent targets in one invocation plus one separate concurrent invocation"
+    },
+    {
+      "name": "wired-admin-publish-timeout-disconnect",
+      "samples": 1,
+      "perRun": { "openedConnections": 3, "closedConnections": 3, "publishes": 3, "acceptedAcknowledgements": 1, "rejections": 0, "timeouts": 1, "disconnects": 1, "retries": 0, "relayFanout": 3 },
+      "completionLatencyMsMinimum": 50,
+      "acceptedRelayCount": 1,
+      "ownerCompletion": "success because at least one relay accepted"
+    },
+    {
+      "name": "wired-admin-publish-explicit-retry",
+      "samples": 1,
+      "perRun": { "openedConnections": 3, "publishes": 3, "acceptedAcknowledgements": 2, "rejections": 1, "retries": 1, "relayFanout": 2 },
+      "completion": "first call retained its healthy acceptance; explicit retry of rejected target then accepted"
+    },
+    {
+      "name": "wired-admin-late-connect",
+      "samples": 1,
+      "perRun": { "publishes": 0, "lateConnectionsClosed": 0 },
+      "result": "empty accepted list at the configured deadline"
+    }
+  ],
+  "interpretation": "Controlled fixture evidence only; not an estimate of production relay load, traffic, acceptance, or latency."
+}

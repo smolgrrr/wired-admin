@@ -1,6 +1,7 @@
 import { Relay, type Event } from "nostr-tools";
 import {
   normalizeRelayUrl,
+  uniqueRelays,
   uniqueSorted,
   withTimeout,
 } from "./utils.js";
@@ -23,8 +24,21 @@ export async function publishNostrEvent(
   { connectRelay = Relay.connect }: PublishNostrEventOptions = {},
 ): Promise<string[]> {
   const results = await Promise.allSettled(
-    relayUrls.map(async (url) => {
-      const relay = await withTimeout(connectRelay(url), timeoutMs, url);
+    uniqueRelays(relayUrls).map(async (url) => {
+      const pendingRelay = connectRelay(url);
+      let relay: RelayConnection;
+      try {
+        relay = await withTimeout(pendingRelay, timeoutMs, url);
+      } catch (error) {
+        void pendingRelay.then((lateRelay) => {
+          try {
+            lateRelay.close();
+          } catch {
+            // Relay already closed.
+          }
+        }, () => {});
+        throw error;
+      }
       try {
         await withTimeout(relay.publish(event), timeoutMs, url);
         return normalizeRelayUrl(relay.url || url);
