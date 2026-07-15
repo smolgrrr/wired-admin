@@ -4,7 +4,7 @@ Issue: [#75](https://github.com/smolgrrr/wired-admin/issues/75)
 
 Audited branches: Wired `codex/relay-efficiency-improvements`; wired-admin `codex/relay-efficiency-audit`
 
-Evidence: [`notification-enrichment-local-2026-07-14`](relay-audit-data/notification-enrichment-local-2026-07-14.json), with the one-shot context baseline reused from [`thread-local-2026-07-14`](relay-audit-data/thread-local-2026-07-14.json).
+Evidence: [`notification-enrichment-local-2026-07-14`](relay-audit-data/notification-enrichment-local-2026-07-14.json), [`notification-enrichment-after-local-2026-07-15`](relay-audit-data/notification-enrichment-after-local-2026-07-15.json), with the one-shot context baseline reused from [`thread-local-2026-07-14`](relay-audit-data/thread-local-2026-07-14.json).
 
 ## Outcome
 
