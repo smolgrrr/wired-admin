@@ -633,11 +633,15 @@ function buildConfessionEvent(admissionEvent: NostrEvent, secretKey: Uint8Array)
 }
 
 async function publishConfessionEvent(event: NostrEvent): Promise<string[]> {
-  return publishNostrEvent(event, confessRelays, confessPublishTimeoutMs);
+  return publishNostrEvent(event, confessRelays, confessPublishTimeoutMs, {
+    workflowOwner: "wired-admin.server.confession-publish",
+  });
 }
 
 async function publishWiredAccountEvent(event: NostrEvent): Promise<string[]> {
-  return publishNostrEvent(event, wiredAccountRelays, wiredAccountPublishTimeoutMs);
+  return publishNostrEvent(event, wiredAccountRelays, wiredAccountPublishTimeoutMs, {
+    workflowOwner: "wired-admin.server.wired-account-publish",
+  });
 }
 
 function confessXConfigured(): boolean {
@@ -1447,7 +1451,9 @@ if (revenueEnabled) {
       Number(process.env.REVENUE_PAYMENT_NOT_FOUND_GRACE_MS || 86_400_000),
     ),
     publishReceipt: (event) =>
-      publishNostrEvent(event, wiredAccountRelays, wiredAccountPublishTimeoutMs),
+      publishNostrEvent(event, wiredAccountRelays, wiredAccountPublishTimeoutMs, {
+        workflowOwner: "wired-admin.server.revenue-receipt-publish",
+      }),
   });
 }
 
@@ -1471,7 +1477,12 @@ async function publishRevenueProfile(): Promise<void> {
     tags: [],
     created_at: Math.floor(Date.now() / 1000),
   }, secretKey);
-  const accepted = await publishNostrEvent(event, wiredAccountRelays, wiredAccountPublishTimeoutMs);
+  const accepted = await publishNostrEvent(
+    event,
+    wiredAccountRelays,
+    wiredAccountPublishTimeoutMs,
+    { workflowOwner: "wired-admin.server.revenue-profile-publish" },
+  );
   if (accepted.length === 0) throw new Error("no relay accepted the Wired revenue profile");
 }
 

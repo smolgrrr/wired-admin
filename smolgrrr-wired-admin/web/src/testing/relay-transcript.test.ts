@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { finalizeEvent, Relay } from "nostr-tools";
 import { publishNostrEvent } from "../nostr-publisher.js";
+import { RelayWorkflowCollector } from "../evidence/relay-workflow-collector.js";
+import { RelayWorkflowEvidenceDispatcher } from "../evidence/relay-workflow-dispatcher.js";
 import {
   RelayTranscriptHarness,
   RelayTranscriptSession,
@@ -101,6 +103,12 @@ test("publisher measures partial acceptance and fresh connection cleanup", async
       publish.acknowledge(false, "blocked", 5);
     },
   });
+  const collector = new RelayWorkflowCollector();
+  let flushEvidence: (() => void) | undefined;
+  const dispatcher = new RelayWorkflowEvidenceDispatcher(
+    collector,
+    (task) => { flushEvidence = task; },
+  );
 
   try {
     const sampleCount = process.env.RELAY_AUDIT_OUTPUT === "1" ? 20 : 1;
@@ -109,9 +117,14 @@ test("publisher measures partial acceptance and fresh connection cleanup", async
     for (let run = 0; run < sampleCount; run += 1) {
       const workflow = session.beginWorkflow(`admin-publish-partial-${run + 1}`);
       assert.deepEqual(
-        await publishNostrEvent(event, [accept.url, secondAccept.url, reject.url], 1_000),
+        await publishNostrEvent(event, [accept.url, secondAccept.url, reject.url], 1_000, {
+          evidenceDispatcher: dispatcher,
+          ownerRetries: 2,
+          workflowOwner: "wired-admin.server.wired-account-publish",
+        }),
         [accept.url, secondAccept.url].sort(),
       );
+      flushEvidence?.();
       await session.waitFor((entries) =>
         entries.filter((entry) => entry.type === "connection-closed").length ===
           (run + 1) * 3,
@@ -159,6 +172,14 @@ test("publisher measures partial acceptance and fresh connection cleanup", async
         evidence: { publishedEventBytes: evidencePublishedEventBytes },
       }));
     }
+    const aggregate = collector.snapshot()[0];
+    assert.equal(aggregate?.samples, sampleCount);
+    assert.equal(aggregate?.outcome, "partial");
+    assert.equal(aggregate?.totals.targets, 3 * sampleCount);
+    assert.equal(aggregate?.totals.eventsPublished, 3 * sampleCount);
+    assert.equal(aggregate?.totals.rejected, sampleCount);
+    assert.equal(aggregate?.totals.ownerRetries, 2 * sampleCount);
+    assert.equal(aggregate?.acceptedCountBuckets.multiple, sampleCount);
   } finally {
     await Promise.all([accept.close(), secondAccept.close(), reject.close()]);
   }
@@ -198,6 +219,72 @@ test("publisher bounds a silent relay and tolerates a disconnected relay", async
     assert.ok(summary.completionLatencyMs >= 50);
   } finally {
     await Promise.all([accept.close(), silent.close(), disconnected.close()]);
+  }
+});
+
+test("publisher collection modes preserve results and controlled p95", async () => {
+  const session = new RelayTranscriptSession();
+  const accept = await RelayTranscriptHarness.listen({
+    session,
+    onPublish(publish) { publish.acknowledge(true, "", 5); },
+  });
+  const reject = await RelayTranscriptHarness.listen({
+    session,
+    onPublish(publish) { publish.acknowledge(false, "blocked", 5); },
+  });
+  const variants = [
+    { name: "disabled", dispatcher: null },
+    {
+      name: "enabled",
+      dispatcher: new RelayWorkflowEvidenceDispatcher(new RelayWorkflowCollector()),
+    },
+    {
+      name: "full",
+      dispatcher: new RelayWorkflowEvidenceDispatcher(
+        new RelayWorkflowCollector({ counterLimit: 1 }),
+      ),
+    },
+    {
+      name: "failing",
+      dispatcher: new RelayWorkflowEvidenceDispatcher({
+        record() { throw new Error("collector unavailable"); },
+      }),
+    },
+  ];
+  const p95ByVariant = new Map<string, number>();
+
+  try {
+    for (const variant of variants) {
+      const latencies: number[] = [];
+      for (let run = 0; run < 20; run += 1) {
+        const workflow = session.beginWorkflow(`${variant.name}-${run}`);
+        assert.deepEqual(await publishNostrEvent(
+          event,
+          [accept.url, reject.url],
+          1_000,
+          { evidenceDispatcher: variant.dispatcher },
+        ), [accept.url]);
+        workflow.complete();
+        latencies.push(session.summary(workflow).completionLatencyMs);
+      }
+      const sorted = [...latencies].sort((left, right) => left - right);
+      p95ByVariant.set(variant.name, sorted[Math.ceil(sorted.length * 0.95) - 1] ?? 0);
+    }
+
+    const disabledP95 = p95ByVariant.get("disabled") ?? 0;
+    assert.equal(
+      [...p95ByVariant.values()].every((p95) => p95 <= disabledP95 + 5),
+      true,
+    );
+    if (process.env.RELAY_AUDIT_OUTPUT === "1") {
+      console.info(JSON.stringify({
+        scenario: "wired-admin-publish-instrumentation-local-fixture",
+        samplesPerVariant: 20,
+        completionP95Ms: Object.fromEntries(p95ByVariant),
+      }));
+    }
+  } finally {
+    await Promise.all([accept.close(), reject.close()]);
   }
 });
 
