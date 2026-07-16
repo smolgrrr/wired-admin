@@ -69,6 +69,7 @@ jobs:
       WIRED_ADMIN_SET_MODERATION_ADMIN_TOKEN: ${{ secrets.PRODUCTION_ADMIN_TOKEN }}
       WIRED_ADMIN_SET_CRON_SECRET: ${{ secrets.PRODUCTION_ADMIN_TOKEN }}
       WIRED_ADMIN_SET_WIRED_NOSTR_SECRET_KEY: ${{ secrets.PRODUCTION_WIRED_NOSTR_SECRET_KEY }}
+      WIRED_ADMIN_SET_MEDIA_MODERATION_MODE: ${{ vars.PRODUCTION_MEDIA_MODERATION_MODE || 'enforce' }}
       WIRED_ADMIN_SET_REVENUE_ENABLED: "true"
       WIRED_ADMIN_SET_REVENUE_DATABASE_FILE: /app/data/revenue.sqlite
       WIRED_ADMIN_SET_REVENUE_PUBLIC_BASE_URL: https://relay.wiredsignal.online
@@ -111,6 +112,7 @@ jobs:
           export WIRED_ADMIN_APP_STORE_DIR
           export WIRED_ADMIN_PUBLIC_BASE_URL
           export WIRED_ADMIN_PUBLIC_SMOKE_URLS="${UMBREL_DEPLOY_PUBLIC_SMOKE_URLS:-}"
+          export WIRED_ADMIN_IMAGE_OVERRIDE="ghcr.io/${GITHUB_REPOSITORY,,}-web:sha-${GITHUB_SHA:0:7}"
 
           cd "${WIRED_ADMIN_APP_STORE_DIR}"
           git fetch origin main --prune
@@ -123,3 +125,15 @@ jobs:
           REVENUE_PROFILE_EXPECTED_PUBKEY=3ff4b1b836c7e63ee4acf391270d8660e1b7af56ba9474b92838bb079e75287d \
           REVENUE_PROFILE_EXPECTED_ENABLED="${{ vars.PRODUCTION_REVENUE_ACCEPT_INVOICES || 'false' }}" \
           node scripts/verify-revenue-profile.mjs https://relay.wiredsignal.online
+          curl --fail --silent --show-error --retry 6 --retry-delay 5 \
+            https://relay.wiredsignal.online/api/media-moderation/status \
+            | node -e '
+                let body = "";
+                process.stdin.on("data", (chunk) => { body += chunk; });
+                process.stdin.on("end", () => {
+                  const status = JSON.parse(body);
+                  if (status.mode !== process.env.WIRED_ADMIN_SET_MEDIA_MODERATION_MODE) {
+                    throw new Error(`media moderation mode is ${status.mode}`);
+                  }
+                });
+              '
