@@ -13,6 +13,12 @@ import {
 } from "./contracts/relay-workflow-evidence.js";
 import { RelayWorkflowCollector } from "./evidence/relay-workflow-collector.js";
 import { RelayWorkflowEvidenceDispatcher } from "./evidence/relay-workflow-dispatcher.js";
+import {
+  AdminRelayWorkflowStatusAdapter,
+  RelayWorkflowStatusExporter,
+  adminWorkflowStatusExportEnabled,
+  createAdminWorkflowStatusSink,
+} from "./evidence/relay-workflow-exporter.js";
 
 type RelayConnection = Pick<
   Awaited<ReturnType<typeof Relay.connect>>,
@@ -31,8 +37,25 @@ export type PublishNostrEventOptions = {
   >;
 };
 
-const workflowCollector = new RelayWorkflowCollector();
+let scheduleWorkflowStatusExport = () => {};
+const workflowCollector = new RelayWorkflowCollector({
+  onChange: () => { scheduleWorkflowStatusExport(); },
+});
 const workflowDispatcher = new RelayWorkflowEvidenceDispatcher(workflowCollector);
+const workflowStatusExportEnabled = adminWorkflowStatusExportEnabled();
+const workflowStatusExporter = new RelayWorkflowStatusExporter(
+  createAdminWorkflowStatusSink({
+    endpoint: String(process.env.RELAY_WORKFLOW_STATUS_ENDPOINT ?? "").trim(),
+    token: String(process.env.WORKFLOW_STATUS_ADMIN_TOKEN ?? "").trim(),
+  }),
+  { enabled: workflowStatusExportEnabled },
+);
+const workflowStatusAdapter = new AdminRelayWorkflowStatusAdapter(
+  workflowCollector,
+  workflowStatusExporter,
+  { enabled: workflowStatusExportEnabled },
+);
+scheduleWorkflowStatusExport = () => { workflowStatusAdapter.schedule(); };
 
 export function getServerRelayWorkflowEvidence() {
   return workflowCollector.snapshot();
@@ -42,7 +65,12 @@ export function getServerRelayWorkflowEvidenceStatus() {
   return {
     ...workflowDispatcher.status,
     enabled: serverRelayWorkflowEvidenceEnabled(),
+    export: workflowStatusExporter.status,
   };
+}
+
+export function flushServerRelayWorkflowStatus(): void {
+  workflowStatusAdapter.flushNow();
 }
 
 export function serverRelayWorkflowEvidenceEnabled(

@@ -38,3 +38,32 @@ test("admin collector normalizes invalid counter limits", () => {
   collector.record(evidence);
   assert.equal(collector.snapshot()[0]?.samples, 1);
 });
+
+test("admin collector drains sealed windows and isolates export scheduling", () => {
+  let changes = 0;
+  const collector = new RelayWorkflowCollector({
+    onChange() {
+      changes += 1;
+      throw new Error("export scheduler unavailable");
+    },
+  });
+  assert.doesNotThrow(() => collector.record(evidence));
+  assert.equal(changes, 1);
+  assert.equal(collector.drain().length, 1);
+  assert.deepEqual(collector.snapshot(), []);
+});
+
+test("admin collector carries a late cleanup into the next sealed window", () => {
+  const collector = new RelayWorkflowCollector();
+  collector.record(evidence);
+  assert.equal(collector.drain().length, 1);
+
+  collector.recordLateConnectionClosed({
+    workflowOwner: evidence.workflowOwner,
+    operation: evidence.operation,
+    outcome: evidence.outcome,
+  });
+
+  assert.equal(collector.snapshot()[0]?.samples, 0);
+  assert.equal(collector.snapshot()[0]?.totals.lateConnectionsClosed, 1);
+});

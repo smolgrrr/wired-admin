@@ -9,6 +9,31 @@ const DURATION_BUCKETS_MS = [
   10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 60_000, 3_600_000,
 ] as const;
 
+const TOTAL_KEYS = [
+  "attempts",
+  "targets",
+  "connectionsOpened",
+  "connectionsClosed",
+  "connectionsReused",
+  "lateConnectionsClosed",
+  "requestsSent",
+  "eventsPublished",
+  "eventsReceived",
+  "requestBytes",
+  "eventBytesSent",
+  "eventBytesReceived",
+  "uniqueResults",
+  "duplicates",
+  "coalescedOperations",
+  "eose",
+  "terminalClosed",
+  "connectFailed",
+  "timedOut",
+  "cancelled",
+  "rejected",
+  "ownerRetries",
+] as const;
+
 type CounterGroup = Record<string, number>;
 
 export type RelayWorkflowAggregate = {
@@ -36,15 +61,17 @@ export type RelayWorkflowEvidenceRecorder = {
 export class RelayWorkflowCollector implements RelayWorkflowEvidenceRecorder {
   private readonly aggregates = new Map<string, MutableAggregate>();
   private readonly counterLimit: number;
+  private readonly onChange: () => void;
   private invalid = 0;
 
-  constructor(options: { counterLimit?: number } = {}) {
+  constructor(options: { counterLimit?: number; onChange?: () => void } = {}) {
     const requestedLimit = options.counterLimit;
     this.counterLimit = typeof requestedLimit === "number" &&
       Number.isFinite(requestedLimit) && Number.isInteger(requestedLimit) &&
       requestedLimit > 0
       ? Math.min(requestedLimit, RELAY_EVIDENCE_LIMITS.count)
       : RELAY_EVIDENCE_LIMITS.count;
+    this.onChange = options.onChange ?? (() => {});
   }
 
   get invalidCount(): number {
@@ -66,6 +93,7 @@ export class RelayWorkflowCollector implements RelayWorkflowEvidenceRecorder {
     if (aggregate.samples >= this.counterLimit) {
       aggregate.overflowed = this.add(aggregate.overflowed, 1);
       this.aggregates.set(key, aggregate);
+      this.notifyChange();
       return;
     }
 
@@ -109,6 +137,7 @@ export class RelayWorkflowCollector implements RelayWorkflowEvidenceRecorder {
     }
     this.addDuration(aggregate.completionMs, evidence.timingMs.completion);
     this.aggregates.set(key, aggregate);
+    this.notifyChange();
   }
 
   recordLateConnectionClosed(
@@ -122,12 +151,13 @@ export class RelayWorkflowCollector implements RelayWorkflowEvidenceRecorder {
       evidenceKey.operation,
       evidenceKey.outcome,
     ].join("|");
-    const aggregate = this.aggregates.get(key);
-    if (!aggregate) return;
+    const aggregate = this.aggregates.get(key) ?? this.createAggregate(evidenceKey);
     aggregate.totals.lateConnectionsClosed = this.add(
       aggregate.totals.lateConnectionsClosed ?? 0,
       1,
     );
+    this.aggregates.set(key, aggregate);
+    this.notifyChange();
   }
 
   snapshot(): RelayWorkflowAggregate[] {
@@ -139,8 +169,14 @@ export class RelayWorkflowCollector implements RelayWorkflowEvidenceRecorder {
       .map((aggregate) => structuredClone(aggregate));
   }
 
+  drain(): RelayWorkflowAggregate[] {
+    const aggregates = this.snapshot();
+    this.aggregates.clear();
+    return aggregates;
+  }
+
   private createAggregate(
-    evidence: RelayWorkflowEvidence,
+    evidence: Pick<RelayWorkflowEvidence, "workflowOwner" | "operation" | "outcome">,
   ): MutableAggregate {
     return {
       schemaVersion: 1,
@@ -149,7 +185,7 @@ export class RelayWorkflowCollector implements RelayWorkflowEvidenceRecorder {
       outcome: evidence.outcome,
       samples: 0,
       overflowed: 0,
-      totals: {},
+      totals: Object.fromEntries(TOTAL_KEYS.map((key) => [key, 0])),
       acceptedCountBuckets: Object.fromEntries(
         RELAY_ACCEPTED_COUNT_BUCKETS.map((bucket) => [bucket, 0]),
       ),
@@ -167,5 +203,13 @@ export class RelayWorkflowCollector implements RelayWorkflowEvidenceRecorder {
 
   private add(current: number, increment: number): number {
     return Math.min(this.counterLimit, current + increment);
+  }
+
+  private notifyChange(): void {
+    try {
+      this.onChange();
+    } catch {
+      // Evidence export scheduling never affects relay work.
+    }
   }
 }

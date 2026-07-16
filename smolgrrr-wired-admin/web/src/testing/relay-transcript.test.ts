@@ -9,6 +9,10 @@ import {
 import { RelayWorkflowCollector } from "../evidence/relay-workflow-collector.js";
 import { RelayWorkflowEvidenceDispatcher } from "../evidence/relay-workflow-dispatcher.js";
 import {
+  AdminRelayWorkflowStatusAdapter,
+  RelayWorkflowStatusExporter,
+} from "../evidence/relay-workflow-exporter.js";
+import {
   RelayTranscriptHarness,
   RelayTranscriptSession,
   type RelayPublishController,
@@ -235,11 +239,28 @@ test("publisher collection modes preserve results and controlled p95", async () 
     session,
     onPublish(publish) { publish.acknowledge(false, "blocked", 5); },
   });
+  let scheduleExport = () => {};
+  const exportCollector = new RelayWorkflowCollector({
+    onChange: () => { scheduleExport(); },
+  });
+  const exportAdapter = new AdminRelayWorkflowStatusAdapter(
+    exportCollector,
+    new RelayWorkflowStatusExporter(async () => {}),
+    {
+      setTimer: () => ({ unref() {} }) as NodeJS.Timeout,
+      clearTimer() {},
+    },
+  );
+  scheduleExport = () => { exportAdapter.schedule(); };
   const variants = [
     { name: "disabled", dispatcher: null },
     {
       name: "enabled",
       dispatcher: new RelayWorkflowEvidenceDispatcher(new RelayWorkflowCollector()),
+    },
+    {
+      name: "export-scheduled",
+      dispatcher: new RelayWorkflowEvidenceDispatcher(exportCollector),
     },
     {
       name: "full",
