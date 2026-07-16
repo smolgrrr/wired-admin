@@ -24,6 +24,14 @@ function isPublicHttpRouteAllowed(req: Request): boolean {
     return req.method === "GET" || req.method === "OPTIONS";
   }
 
+  if (url.pathname === "/api/media-moderation/verdicts") {
+    return req.method === "POST" || req.method === "OPTIONS";
+  }
+
+  if (url.pathname === "/api/media-moderation/status") {
+    return req.method === "GET" || req.method === "OPTIONS";
+  }
+
   if (url.pathname === "/api/confess/status") {
     return req.method === "GET" || req.method === "OPTIONS";
   }

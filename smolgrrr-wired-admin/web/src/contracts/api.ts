@@ -67,6 +67,62 @@ export type ModerationActionResponse = {
   action: ModerationAction;
 };
 
+export type MediaModerationAdminState = {
+  status: {
+    mode: "off" | "shadow" | "enforce";
+    policyVersion: string;
+    detectorVersion: string;
+    queueDepth: number;
+    activeImages: number;
+    activeVideos: number;
+    batchLatencyP95Ms: number | null;
+    scanLatencyP95Ms: number | null;
+    imageScanLatencyP95Ms: number | null;
+    videoScanLatencyP95Ms: number | null;
+    queueAgeMs: number;
+    overrideCount: number;
+    cacheHits: number;
+    completed: number;
+    blocked: number;
+    errors: number;
+  };
+  jobs: Array<{
+    id: string;
+    eventId: string;
+    url: string;
+    mediaType: "image" | "video";
+    createdAt: number;
+  }>;
+  verdicts: Array<{
+    eventId: string;
+    url: string;
+    mediaType: "image" | "video";
+    status: string;
+    reason: string;
+    checkedAt: number;
+    sha256?: string;
+    perceptualHash?: string;
+  }>;
+  overrides: Array<{
+    id: string;
+    targetType: "sha256" | "url";
+    target: string;
+    decision: "allowed" | "blocked";
+    createdAt: number;
+    moderator: string;
+    note?: string;
+  }>;
+  audit: Array<{
+    id: string;
+    at: number;
+    actor: string;
+    action: string;
+    targetType: "sha256" | "url";
+    target: string;
+    detail?: string;
+  }>;
+};
+
 export type ConfessStatus = {
   configured: boolean;
   pubkey: string;
