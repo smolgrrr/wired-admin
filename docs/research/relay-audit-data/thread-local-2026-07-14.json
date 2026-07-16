@@ -1,0 +1,133 @@
+{
+  "runId": "thread-local-2026-07-14-r2",
+  "applicationCommit": "8bcb2f4 plus issue-73 review fixes",
+  "harnessCommit": "05f234a",
+  "instrumentation": "RelayTranscriptSession v1; exact workflow-index slices",
+  "environment": "local Node.js/Vitest with loopback WebSocket relay fixtures",
+  "relayCoverage": "two local relay URLs representing one configured target and one NIP-19 hint; no public relay connections",
+  "startedAt": "2026-07-14T23:01:52Z",
+  "endedAt": "2026-07-14T23:01:57Z",
+  "scenarios": [
+    {
+      "name": "thread-navigation-cold-local-fixture",
+      "samples": 20,
+      "requiredResultIds": 3,
+      "resultIdsResolved": 3,
+      "perRun": {
+        "openedConnections": 2,
+        "requests": 8,
+        "closes": 8,
+        "relayEose": 8,
+        "clientEoseTimeouts": 0,
+        "activeSubscriptionPeak": 4,
+        "returnedEvents": 12,
+        "uniqueReturnedEventIds": 3,
+        "repeatedOperations": 4,
+        "relayFanout": 2,
+        "connectionReuseCount": 6
+      },
+      "initialContentLatencyMs": {
+        "p50": 7,
+        "p95": 28,
+        "samples": [28, 10, 9, 8, 10, 7, 7, 7, 7, 7, 7, 8, 7, 7, 7, 8, 8, 28, 7, 6]
+      },
+      "completionLatencyMs": {
+        "p50": 28,
+        "p95": 48,
+        "samples": [57, 33, 32, 30, 31, 28, 28, 28, 27, 29, 28, 29, 28, 28, 27, 29, 28, 48, 27, 25]
+      },
+      "protocolEvidenceSample": {
+        "requestFilters": [
+          [{ "ids": ["01e10d2f51b22d5468b00b5a5765d57cae63aee8d9e70510f75fa47e98f3f386"], "kinds": [1, 1068], "limit": 1 }],
+          [{ "#e": ["01e10d2f51b22d5468b00b5a5765d57cae63aee8d9e70510f75fa47e98f3f386"], "kinds": [1], "limit": 100 }],
+          [{ "#e": ["01e10d2f51b22d5468b00b5a5765d57cae63aee8d9e70510f75fa47e98f3f386", "2e74fc29a91b602bbe5bdcada5d00c95e6d4c06dd2893048fb02cebcfe87e3f6"], "kinds": [1], "limit": 100 }],
+          [{ "#e": ["01e10d2f51b22d5468b00b5a5765d57cae63aee8d9e70510f75fa47e98f3f386", "2e74fc29a91b602bbe5bdcada5d00c95e6d4c06dd2893048fb02cebcfe87e3f6", "1946ab34dd160450b4ea8743c13c8979e1fc6caf7fe9ea73698eb9d2ccbcd48e"], "kinds": [1], "limit": 100 }]
+        ],
+        "eachFilterOccurrences": 2,
+        "requestBytes": [119, 115, 119, 115, 182, 182, 249, 249],
+        "returnedEventBytes": [364, 448, 364, 448, 448, 486, 448, 486, 448, 486, 448, 486],
+        "subscriptionLifetimesMs": [11, 11, 11, 11, 11, 11, 0, 0],
+        "requestEoseCloseIdsExactMatch": true
+      }
+    },
+    {
+      "name": "thread-referenced-context-warm-local-fixture",
+      "samples": 20,
+      "reachableResultIds": 1,
+      "reachableResultIdsResolved": 1,
+      "missingResultIds": 1,
+      "perRun": {
+        "requests": 2,
+        "closes": 2,
+        "relayEose": 2,
+        "clientEoseTimeouts": 0,
+        "activeSubscriptionPeak": 2,
+        "returnedEvents": 1,
+        "relayFanout": 2
+      },
+      "completionLatencyMs": {
+        "p50": 17,
+        "p95": 19,
+        "samples": [15, 16, 16, 17, 23, 19, 19, 15, 18, 17, 16, 18, 19, 18, 16, 18, 17, 19, 19, 17]
+      },
+      "protocolEvidenceSample": {
+        "filter": { "ids": ["01e10d2f51b22d5468b00b5a5765d57cae63aee8d9e70510f75fa47e98f3f386", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"], "kinds": [1], "limit": 2 },
+        "requestBytes": [182, 182],
+        "returnedEventBytes": [365],
+        "subscriptionLifetimesMs": [1, 17],
+        "requestEoseCloseIdsExactMatch": true
+      }
+    },
+    {
+      "name": "thread-preview-local-fixture",
+      "samples": 20,
+      "selection": { "configuredRelays": 1, "decodedNip19Hints": 1 },
+      "requiredResultIds": 3,
+      "resultIdsResolved": 3,
+      "perRun": {
+        "openedConnections": 2,
+        "closedConnections": 2,
+        "requests": 2,
+        "closes": 2,
+        "relayEose": 2,
+        "clientEoseTimeouts": 0,
+        "activeSubscriptionPeak": 2,
+        "returnedEvents": 6,
+        "uniqueReturnedEventIds": 3,
+        "repeatedOperations": 1,
+        "relayFanout": 2
+      },
+      "completionLatencyMs": {
+        "p50": 27,
+        "p95": 34,
+        "samples": [61, 34, 34, 29, 30, 28, 27, 27, 27, 27, 26, 27, 27, 27, 27, 27, 26, 27, 27, 26]
+      },
+      "protocolEvidenceSample": {
+        "filters": [{ "ids": ["c5b9ed77d97677a519a8524591710bd5bdbd0f907f31c350319eebcda114fee8"], "kinds": [1], "limit": 1 }, { "#e": ["c5b9ed77d97677a519a8524591710bd5bdbd0f907f31c350319eebcda114fee8"], "kinds": [1], "limit": 500 }],
+        "requestBytes": [214, 214],
+        "returnedEventBytes": [372, 448, 538, 372, 448, 538],
+        "subscriptionLifetimesMs": [23, 22],
+        "requestEoseCloseIdsExactMatch": true
+      }
+    },
+    {
+      "name": "thread-preview-legacy-descendant-local-fixture",
+      "samples": 1,
+      "reachableResultIds": 3,
+      "resultIdsResolved": 2,
+      "unresolvedIdReason": "The nested reply references only its immediate parent and does not match the root-only reply filter."
+    },
+    {
+      "name": "thread-preview-degraded-relay-local-fixture",
+      "samples": 1,
+      "requiredResultIds": 3,
+      "resultIdsResolved": 3,
+      "requests": 2,
+      "returnedEvents": 3,
+      "relayEose": 1,
+      "relayDisconnectedBeforeEose": 1,
+      "completionLatencyMs": 2506,
+      "interpretation": "The exact value is the configured application fallback timer, not an estimate of public relay latency."
+    }
+  ]
+}

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import type { IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
-import { finalizeEvent, getPublicKey, nip19, Relay, type EventTemplate } from "nostr-tools";
+import { finalizeEvent, getPublicKey, nip19, type EventTemplate } from "nostr-tools";
 import { WebSocketServer, type RawData } from "ws";
 import {
   envFlag as readEnvFlag,
@@ -16,8 +16,6 @@ import {
   readJsonResponse as readHttpJsonResponse,
   summarizeHttpError,
   uniqueRelays,
-  uniqueSorted as uniqueSortedValues,
-  withTimeout as withPromiseTimeout,
 } from "./src/utils.js";
 import { verifyPow as verifyEventPow } from "./src/pow.js";
 import { createXClient } from "./src/x-client.js";
@@ -26,10 +24,14 @@ import {
   isSafeConfessPostcardImageUrl,
 } from "./src/confess-postcard-renderer.js";
 import { createModerationService } from "./src/moderation.js";
-import { createFeedSnapshotService } from "./src/feed-snapshot-service.js";
+import {
+  createFeedSnapshotService,
+  scheduleFeedSnapshotRefresh,
+} from "./src/feed-snapshot-service.js";
 import { registerHttpRoutes } from "./src/http-routes.js";
 import { createRelayGateway } from "./src/relay-gateway.js";
 import { createHttpAccess } from "./src/http-access.js";
+import { publishNostrEvent } from "./src/nostr-publisher.js";
 import { createTransientMediaAnalyzer } from "./src/media-moderation/analyzer.js";
 import { registerMediaModerationRoutes } from "./src/media-moderation/http-routes.js";
 import { createNsfwJsClassifier } from "./src/media-moderation/local-classifier.js";
@@ -628,34 +630,6 @@ function buildSignedAccountEvent(
 
 function buildConfessionEvent(admissionEvent: NostrEvent, secretKey: Uint8Array): NostrEvent {
   return buildSignedAccountEvent(admissionEvent, secretKey, { trimContent: true });
-}
-
-async function publishNostrEvent(
-  event: NostrEvent,
-  relays: string[],
-  timeoutMs: number,
-): Promise<string[]> {
-  const results = await Promise.allSettled(
-    relays.map(async (url) => {
-      const relay = await withPromiseTimeout(Relay.connect(url), timeoutMs, url);
-      try {
-        await withPromiseTimeout(relay.publish(event), timeoutMs, url);
-        return normalizeRelayUrl(relay.url || url);
-      } finally {
-        try {
-          relay.close();
-        } catch {
-          // Relay already closed.
-        }
-      }
-    }),
-  );
-
-  return uniqueSortedValues(
-    results
-      .filter((result) => result.status === "fulfilled")
-      .map((result) => result.value),
-  );
 }
 
 async function publishConfessionEvent(event: NostrEvent): Promise<string[]> {
@@ -1611,13 +1585,14 @@ void feedSnapshot.refresh().catch(() => {
   if (!feedSnapshot.current()) console.error(feedSnapshot.lastRefreshError() || "initial refresh failed");
 });
 
-if (refreshSeconds > 0) {
-  setInterval(() => {
-    void feedSnapshot.refresh().catch(() => {
-      console.error(feedSnapshot.lastRefreshError() || "scheduled refresh failed");
-    });
-  }, refreshSeconds * 1000).unref();
-}
+const feedSnapshotRefreshSchedule = scheduleFeedSnapshotRefresh(
+  () => feedSnapshot.refresh(),
+  refreshSeconds,
+  () => {
+    console.error(feedSnapshot.lastRefreshError() || "scheduled refresh failed");
+  },
+);
+server.on("close", () => feedSnapshotRefreshSchedule?.close());
 
 if (confessXConfig.enabled) {
   void processPendingConfessXMirrors().catch((error) => {

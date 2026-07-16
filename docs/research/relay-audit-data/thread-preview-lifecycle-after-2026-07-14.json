@@ -1,0 +1,31 @@
+{
+  "runId": "thread-preview-lifecycle-after-2026-07-14",
+  "environment": "local Node.js/Vitest with two loopback WebSocket relay fixtures",
+  "relayCoverage": "identical one configured plus one decoded NIP-19 hinted relay",
+  "change": "settle disconnected relays and close connections arriving after the unchanged deadline",
+  "before": {
+    "normalSamples": 20,
+    "normalCompletionLatencyMs": { "p50": 27, "p95": 34 },
+    "degradedCompletionLatencyMs": 2506,
+    "degradedResultIds": { "required": 3, "resolved": 3 }
+  },
+  "after": {
+    "normalSamples": 20,
+    "normalCompletionLatencyMs": {
+      "p50": 25,
+      "p95": 31,
+      "samples": [55, 31, 30, 27, 27, 26, 25, 26, 27, 26, 25, 25, 25, 25, 24, 24, 24, 25, 26, 25]
+    },
+    "degradedCompletionLatencyMs": 26,
+    "degradedResultIds": { "required": 3, "resolved": 3 },
+    "normalProtocol": {
+      "requests": 2,
+      "closes": 2,
+      "returnedEvents": 6,
+      "uniqueReturnedEventIds": 3,
+      "relayFanout": 2
+    },
+    "lateConnectionClosed": true
+  },
+  "interpretation": "This controlled comparison establishes equivalent fixture output and removal of dead waiting. It is not an estimate of public relay load or production latency."
+}

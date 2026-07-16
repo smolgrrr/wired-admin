@@ -1,0 +1,100 @@
+{
+  "runId": "notification-enrichment-after-local-2026-07-15",
+  "comparisonRunId": "notification-enrichment-local-2026-07-14",
+  "wiredCommit": "bc106d4",
+  "wiredAdminCommit": "aa1fbb6 plus after-run evidence",
+  "harnessCommit": "05f234a/5c75cf0 contract",
+  "environment": "local Node.js Vitest runner with injected loopback WebSocket relay fixtures",
+  "relayCoverage": "notification: two preconnected loopback relays; quotes: two fallback plus one preconnected hinted loopback relay; no public relay connections",
+  "startedAt": "2026-07-15T00:05:51Z",
+  "endedAt": "2026-07-15T00:05:54Z",
+  "equivalentFixtureInputs": {
+    "notifications": {
+      "pubkeys": 1,
+      "authoredEventId": "3da5743b96ce5440bff1de23111ba09c8c8611fc5ab7cf0a3463a07622e47136",
+      "mentionEventId": "f956beea3d63a2c6035c73d042bfff8234291aa543390c9032bb1f4cfb093386",
+      "reactionFixtureRetainedForFilterRejection": true,
+      "relayEventDelayMs": 5
+    },
+    "quotes": {
+      "fallbackEventId": "265b889705f7482d94a714527b1a6f7b898a89574fc4c00092ea993ee07d7d47",
+      "hintedEventId": "1ddbe17afdbb570d65d1a03f82127d9bd804bda6f819a006eee23706e529d16b",
+      "fallbackEventDelayMs": 5,
+      "fallbackEoseDelayMs": 10,
+      "hintedEventDelayMs": 15,
+      "hintedEoseDelayMs": 20
+    }
+  },
+  "scenarios": [
+    {
+      "name": "wired-browser-notifications-local-fixture-after",
+      "samples": 20,
+      "requiredResultIds": [
+        "3da5743b96ce5440bff1de23111ba09c8c8611fc5ab7cf0a3463a07622e47136",
+        "f956beea3d63a2c6035c73d042bfff8234291aa543390c9032bb1f4cfb093386"
+      ],
+      "resolvedResultIds": [
+        "3da5743b96ce5440bff1de23111ba09c8c8611fc5ab7cf0a3463a07622e47136",
+        "f956beea3d63a2c6035c73d042bfff8234291aa543390c9032bb1f4cfb093386"
+      ],
+      "perRun": {
+        "requests": 4,
+        "closes": 4,
+        "relayEose": 4,
+        "requestEoseCloseIdsExactMatch": true,
+        "returnedEvents": 6,
+        "uniqueReturnedEventIds": 2,
+        "relayFanout": 2
+      },
+      "completionLatencyMs": {
+        "p50": 29,
+        "p95": 39,
+        "samples": [40, 34, 31, 31, 29, 29, 28, 31, 30, 30, 29, 30, 29, 28, 29, 31, 29, 39, 28, 29]
+      },
+      "protocolEvidenceSample": {
+        "filters": [
+          [{ "authors": ["35f737927627c4af1e9a39ae02b086c6b31426d0d64f01e5ce3ee8a445bbd667"], "kinds": [1], "limit": 25 }],
+          [{ "#p": ["35f737927627c4af1e9a39ae02b086c6b31426d0d64f01e5ce3ee8a445bbd667"], "kinds": [1], "limit": 50 }]
+        ],
+        "eachFilterOccurrences": 2,
+        "requestBytes": [119, 114, 119, 114],
+        "returnedEventBytes": [451, 451, 439, 451, 451, 439],
+        "subscriptionLifetimesMs": [20, 21, 28, 29]
+      }
+    },
+    {
+      "name": "wired-browser-quotes-local-fixture-after",
+      "samples": 20,
+      "requiredResultIds": [
+        "265b889705f7482d94a714527b1a6f7b898a89574fc4c00092ea993ee07d7d47",
+        "1ddbe17afdbb570d65d1a03f82127d9bd804bda6f819a006eee23706e529d16b"
+      ],
+      "resolvedResultIds": [
+        "265b889705f7482d94a714527b1a6f7b898a89574fc4c00092ea993ee07d7d47",
+        "1ddbe17afdbb570d65d1a03f82127d9bd804bda6f819a006eee23706e529d16b"
+      ],
+      "perRun": {
+        "requests": 5,
+        "closes": 5,
+        "relayEose": 5,
+        "requestEoseCloseIdsExactMatch": true,
+        "returnedEvents": 3,
+        "uniqueReturnedEventIds": 2,
+        "hintRequests": 1,
+        "relayFanout": 3
+      },
+      "completionLatencyMs": {
+        "p50": 21,
+        "p95": 23,
+        "samples": [22, 21, 21, 21, 23, 22, 21, 22, 20, 22, 20, 23, 22, 22, 20, 21, 22, 21, 22, 21]
+      },
+      "protocolEvidenceSample": {
+        "filterContract": { "ids": "one exact fixture ID", "kinds": [1, 1068], "limit": 1 },
+        "requestBytes": [120, 120, 120, 120, 120],
+        "returnedEventBytes": [382, 382, 386],
+        "subscriptionLifetimesMs": [13, 13, 12, 12, 21]
+      }
+    }
+  ],
+  "interpretation": "This after run reuses the exact deterministic event inputs and delay schedule from the before run. Counts and timings describe controlled fixtures only and are not estimates of public relay traffic or production latency."
+}

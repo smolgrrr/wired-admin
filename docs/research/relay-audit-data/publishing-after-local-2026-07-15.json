@@ -1,0 +1,110 @@
+{
+  "runId": "publishing-after-local-2026-07-15",
+  "comparisonRunId": "publishing-before-local-2026-07-15",
+  "wiredCommit": "bc106d4 plus publishing fixes",
+  "wiredAdminCommit": "f2768ac plus publishing fixes",
+  "environment": "local Node.js test runners with loopback WebSocket relay fixtures",
+  "startedAt": "2026-07-15T00:19:51Z",
+  "endedAt": "2026-07-15T00:19:57Z",
+  "instrumentationRevision": {
+    "wiredRelayHarnessSha256": "234e47765254af99b6405cb0d7654599638b82d5b70c3e6cd37f84ddd755b49f",
+    "wiredPublishAuditSource": "src/nostr/testing/publish-transcript.test.ts",
+    "wiredPublishAuditSha256": "39d68b1963113a5b9517af5a9c026dc6658a1fbb352708328d24de35470139da",
+    "wiredOwnerBoundaryAuditSource": "src/shared/hooks/useSubmitForm.test.tsx",
+    "wiredOwnerBoundaryAuditSha256": "181562adf8097b0844417a915527b33b73919596dbf79ef26e2cbe8e8a7bb9a3",
+    "adminRelayHarnessSha256": "94d1408951ee0fb829852e28445104dbea11d86fe416b189c58a0fc17151f38c",
+    "adminPublishAuditSource": "smolgrrr-wired-admin/web/src/testing/relay-transcript.test.ts",
+    "adminPublishAuditSha256": "b0da44635b25c6863aea6e9c4b4548006df3314521ff54b90836a5686e6e64af",
+    "gatewayAuditSource": "smolgrrr-wired-admin/web/src/testing/relay-gateway.test.ts",
+    "gatewayAuditSha256": "b6c4d3dd98fd1279a7737bc6cc2b65f17570e1c34d264ea6b745aa40c7a3334a"
+  },
+  "relayCoverage": "browser: three preconnected loopback relays for partial acceptance and two for failure/duplicate cases; admin: up to three fresh loopback relay connections per invocation; gateway: one loopback backend; no public relay connections",
+  "fixtureProvenance": "deterministic nostr-tools finalized events, loopback ws servers, explicit ACK/reject/delay/disconnect controllers",
+  "publicRelaysContacted": false,
+  "scenarios": [
+    {
+      "name": "wired-browser-publish-partial-local-fixture",
+      "samples": 20,
+      "perRun": { "publishes": 3, "acceptedAcknowledgements": 2, "rejections": 1, "relayFanout": 3, "openedConnectionsDuringWorkflow": 0 },
+      "completionLatencyMs": { "p50": 7, "p95": 9, "samples": [10, 9, 6, 8, 7, 6, 8, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7] },
+      "publishedEventBytes": [378, 378, 378]
+    },
+    {
+      "name": "wired-browser-publish-duplicate-invocation",
+      "samples": 1,
+      "result": "both callers completed with the exact same two-relay accepted set",
+      "perRun": { "publishes": 2, "acceptedAcknowledgements": 2, "relayFanout": 2 }
+    },
+    {
+      "name": "wired-browser-publish-post-settlement-retry",
+      "samples": 1,
+      "result": "a later explicit call creates a fresh accepted Set and a fresh relay round",
+      "perRun": { "publishes": 2, "acceptedAcknowledgements": 2, "retries": 1, "relayFanout": 2 }
+    },
+    {
+      "name": "wired-browser-publish-full-reject-disconnect",
+      "samples": 1,
+      "perRun": { "publishes": 2, "acceptedAcknowledgements": 0, "rejections": 1, "disconnects": 1, "retries": 0, "relayFanout": 2 },
+      "acceptedRelays": [],
+      "userCompletion": "failed; no signed event exposed and draft reported not posted by owner contract"
+    },
+    {
+      "name": "wired-browser-publish-silent-relay",
+      "samples": 1,
+      "perRun": { "publishes": 2, "acceptedAcknowledgements": 1, "rejections": 0, "retries": 0, "relayFanout": 2 },
+      "pendingAfterMs": 50,
+      "completionTrigger": "silent relay disconnect",
+      "acceptedRelayCount": 1,
+      "userCompletion": "compose remains publishing until aggregate publish settles"
+    },
+    {
+      "name": "wired-browser-owner-visible-completion",
+      "samples": 1,
+      "scheduledSettlementDelayMs": 25,
+      "observedCompletionLatencyMsMinimum": 20,
+      "beforeSettlement": { "submitStatus": "publishing", "signedEventExposed": false },
+      "afterSettlement": { "submitStatus": "published", "signedEventExposed": true, "acceptedRelays": ["wss://relay.example"] },
+      "note": "owner-boundary measurement uses a deferred publisher; protocol p95 is recorded separately"
+    },
+    {
+      "name": "wired-admin-publish-partial-local-fixture",
+      "samples": 20,
+      "perRun": { "openedConnections": 3, "closedConnections": 3, "publishes": 3, "acceptedAcknowledgements": 2, "rejections": 1, "relayFanout": 3 },
+      "completionLatencyMs": { "p50": 13, "p95": 21, "samples": [22, 21, 17, 15, 13, 15, 15, 12, 12, 13, 14, 15, 12, 12, 14, 12, 11, 12, 12, 13] },
+      "publishedEventBytes": [370, 370, 370]
+    },
+    {
+      "name": "wired-admin-publish-duplicate-normalized-target",
+      "samples": 1,
+      "perRun": { "openedConnections": 2, "closedConnections": 2, "publishes": 2, "acceptedAcknowledgements": 2, "relayFanout": 1 },
+      "note": "the equivalent target is removed within the first invocation; the separate invocation remains"
+    },
+    {
+      "name": "wired-admin-publish-timeout-disconnect",
+      "samples": 1,
+      "perRun": { "openedConnections": 3, "closedConnections": 3, "publishes": 3, "acceptedAcknowledgements": 1, "rejections": 0, "timeouts": 1, "disconnects": 1, "retries": 0, "relayFanout": 3 },
+      "completionLatencyMsMinimum": 50,
+      "acceptedRelayCount": 1,
+      "ownerCompletion": "success because at least one relay accepted"
+    },
+    {
+      "name": "wired-admin-publish-explicit-retry",
+      "samples": 1,
+      "perRun": { "openedConnections": 3, "publishes": 3, "acceptedAcknowledgements": 2, "rejections": 1, "retries": 1, "relayFanout": 2 },
+      "completion": "first call retained its healthy acceptance; explicit retry of rejected target then accepted"
+    },
+    {
+      "name": "wired-admin-late-connect",
+      "samples": 1,
+      "perRun": { "publishes": 0, "lateConnectionsClosed": 1 },
+      "result": "empty accepted list at the configured deadline"
+    },
+    {
+      "name": "wired-admin-relay-gateway",
+      "samples": 2,
+      "accepted": { "backendPublishes": 1, "acceptedAcknowledgements": 1, "relayFanout": 1, "publishedEventBytes": 395 },
+      "powRejected": { "backendPublishes": 0, "clientOkFalse": true }
+    }
+  ],
+  "interpretation": "Controlled fixture evidence only; not an estimate of production relay load, traffic, acceptance, or latency."
+}
