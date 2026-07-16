@@ -228,8 +228,12 @@ async function fetchMediaAdmin() {
         headers: adminHeaders(),
     });
     if (!response.ok) {
-        elements.mediaOverrideStatus.textContent =
-            response.status === 401 ? "Enter the admin token to review media." : `HTTP ${response.status}`;
+        const message = response.status === 401
+            ? "Enter the admin token above to load stored scan results."
+            : `Media verdict request failed (HTTP ${response.status}).`;
+        elements.mediaOverrideStatus.textContent = message;
+        elements.mediaVerdicts.innerHTML = "";
+        elements.mediaVerdicts.append(activityItem(Date.now(), "media verdicts unavailable", message));
         return;
     }
     latestMediaAdmin = (await response.json());
