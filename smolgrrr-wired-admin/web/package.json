@@ -7,6 +7,7 @@
     "build": "rm -rf dist dist-admin-client && tsc -p tsconfig.json && tsc -p tsconfig.admin-client.json && cp dist-admin-client/admin-client/app.js public/app.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.admin-client.json --noEmit",
     "test": "npm run build && node --test dist/src/**/*.test.js",
+    "test:relay-audit": "npm run build && RELAY_AUDIT_OUTPUT=1 node --test --test-name-pattern='publisher collection modes preserve results and controlled p95' dist/src/testing/relay-transcript.test.js",
     "start": "node dist/server.js",
     "check": "npm run typecheck && npm run build && node --check dist/server.js"
   },
