@@ -42,6 +42,7 @@ test("an enrolled event receives one settled NIP-57 zap and one public receipt",
   const recipientPubkey = getPublicKey(recipientSecret);
   const relayUrl = "wss://staging.wiredsignal.online";
   const publishedReceipts: unknown[] = [];
+  const publishedReceiptRetries: number[] = [];
   const service = new RevenueService({
     databaseFile: path.join(directory, "revenue.sqlite"),
     encryptionKey: Buffer.alloc(32, 7),
@@ -49,9 +50,10 @@ test("an enrolled event receives one settled NIP-57 zap and one public receipt",
     relayUrl,
     callbackUrl: "https://staging.wiredsignal.online/api/revenue/zap",
     wallet,
-    publishReceipt: async (event) => {
+    publishReceipt: async (event, ownerRetries) => {
       publishedReceipts.push(event);
-      return [relayUrl];
+      publishedReceiptRetries.push(ownerRetries);
+      return publishedReceipts.length === 1 ? [] : [relayUrl];
     },
   });
 
@@ -95,6 +97,10 @@ test("an enrolled event receives one settled NIP-57 zap and one public receipt",
     assert.deepEqual(concurrentDuplicate, invoice);
 
     await wallet.settleInvoice(invoice.paymentHash);
+    await assert.rejects(
+      service.reconcileInvoice(invoice.paymentHash),
+      /no relay accepted the zap receipt/,
+    );
     const first = await service.reconcileInvoice(invoice.paymentHash);
     const duplicate = await service.reconcileInvoice(invoice.paymentHash);
 
@@ -102,7 +108,8 @@ test("an enrolled event receives one settled NIP-57 zap and one public receipt",
     assert.equal(first.creatorMsat, 7_000);
     assert.equal(first.wiredMsat, 3_001);
     assert.deepEqual(duplicate, first);
-    assert.equal(publishedReceipts.length, 1);
+    assert.equal(publishedReceipts.length, 2);
+    assert.deepEqual(publishedReceiptRetries, [0, 1]);
     assert.equal(verifyEvent(first.receipt), true);
     assert.equal(first.receipt.kind, 9735);
     assert.deepEqual(first.receipt.tags.find((tag) => tag[0] === "e"), ["e", event.id]);
