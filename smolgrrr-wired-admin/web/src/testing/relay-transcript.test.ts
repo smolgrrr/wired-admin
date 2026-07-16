@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { finalizeEvent, Relay } from "nostr-tools";
-import { publishNostrEvent } from "../nostr-publisher.js";
+import {
+  publishNostrEvent,
+  type RelayConnector,
+} from "../nostr-publisher.js";
 import { RelayWorkflowCollector } from "../evidence/relay-workflow-collector.js";
 import { RelayWorkflowEvidenceDispatcher } from "../evidence/relay-workflow-dispatcher.js";
 import {
@@ -119,7 +122,6 @@ test("publisher measures partial acceptance and fresh connection cleanup", async
       assert.deepEqual(
         await publishNostrEvent(event, [accept.url, secondAccept.url, reject.url], 1_000, {
           evidenceDispatcher: dispatcher,
-          ownerRetries: 2,
           workflowOwner: "wired-admin.server.wired-account-publish",
         }),
         [accept.url, secondAccept.url].sort(),
@@ -178,7 +180,7 @@ test("publisher measures partial acceptance and fresh connection cleanup", async
     assert.equal(aggregate?.totals.targets, 3 * sampleCount);
     assert.equal(aggregate?.totals.eventsPublished, 3 * sampleCount);
     assert.equal(aggregate?.totals.rejected, sampleCount);
-    assert.equal(aggregate?.totals.ownerRetries, 2 * sampleCount);
+    assert.equal(aggregate?.totals.ownerRetries, 0);
     assert.equal(aggregate?.acceptedCountBuckets.multiple, sampleCount);
   } finally {
     await Promise.all([accept.close(), secondAccept.close(), reject.close()]);
@@ -291,8 +293,15 @@ test("publisher collection modes preserve results and controlled p95", async () 
 test("publisher closes a relay that finishes connecting after its deadline", async () => {
   let closes = 0;
   let publishes = 0;
+  const collector = new RelayWorkflowCollector();
+  const evidenceTasks: Array<() => void> = [];
+  const dispatcher = new RelayWorkflowEvidenceDispatcher(
+    collector,
+    (task) => { evidenceTasks.push(task); },
+  );
 
   assert.deepEqual(await publishNostrEvent(event, ["wss://late.example"], 5, {
+    evidenceDispatcher: dispatcher,
     async connectRelay(url) {
       await new Promise((resolve) => setTimeout(resolve, 25));
       return {
@@ -307,10 +316,147 @@ test("publisher closes a relay that finishes connecting after its deadline", asy
       };
     },
   }), []);
+  evidenceTasks.shift()?.();
   await new Promise((resolve) => setTimeout(resolve, 35));
+  evidenceTasks.shift()?.();
 
   assert.equal(publishes, 0);
   assert.equal(closes, 1);
+  const aggregate = collector.snapshot()[0];
+  assert.equal(aggregate?.outcome, "timed-out");
+  assert.equal(aggregate?.totals.lateConnectionsClosed, 1);
+});
+
+test("publisher isolates synchronous connector failures and records observed outcomes", async () => {
+  const collector = new RelayWorkflowCollector();
+  const evidenceTasks: Array<() => void> = [];
+  const dispatcher = new RelayWorkflowEvidenceDispatcher(
+    collector,
+    (task) => { evidenceTasks.push(task); },
+  );
+  let acceptedCloses = 0;
+
+  assert.deepEqual(await publishNostrEvent(
+    event,
+    ["wss://throws.example", "wss://accepts.example"],
+    25,
+    {
+      evidenceDispatcher: dispatcher,
+      connectRelay(url) {
+        if (url.includes("throws")) throw new Error("connector unavailable");
+        return Promise.resolve({
+          url,
+          close() { acceptedCloses += 1; },
+          async publish() { return "accepted"; },
+        });
+      },
+    },
+  ), ["wss://accepts.example"]);
+  evidenceTasks.shift()?.();
+
+  const aggregate = collector.snapshot()[0];
+  assert.equal(acceptedCloses, 1);
+  assert.equal(aggregate?.outcome, "partial");
+  assert.equal(aggregate?.totals.connectFailed, 1);
+  assert.equal(aggregate?.totals.connectionsOpened, 1);
+  assert.equal(aggregate?.totals.connectionsClosed, 1);
+  assert.equal(aggregate?.totals.eventsPublished, 1);
+  assert.equal(aggregate?.totals.ownerRetries, 0);
+});
+
+test("publisher records an owner-declared retry only after a real repeated attempt", async () => {
+  const collector = new RelayWorkflowCollector();
+  const evidenceTasks: Array<() => void> = [];
+  const dispatcher = new RelayWorkflowEvidenceDispatcher(
+    collector,
+    (task) => { evidenceTasks.push(task); },
+  );
+  let attempts = 0;
+  const connectRelay: RelayConnector = async (url) => ({
+      url,
+      close() {},
+      async publish() {
+        attempts += 1;
+        if (attempts === 1) throw new Error("rate limited");
+        return "accepted";
+      },
+    });
+
+  assert.deepEqual(await publishNostrEvent(event, ["wss://retry.example"], 25, {
+    connectRelay,
+    evidenceDispatcher: dispatcher,
+  }), []);
+  evidenceTasks.shift()?.();
+  assert.deepEqual(await publishNostrEvent(event, ["wss://retry.example"], 25, {
+    connectRelay,
+    evidenceDispatcher: dispatcher,
+    ownerRetries: 1,
+  }), ["wss://retry.example"]);
+  evidenceTasks.shift()?.();
+
+  const completed = collector.snapshot().find((entry) => entry.outcome === "completed");
+  assert.equal(completed?.samples, 1);
+  assert.equal(completed?.totals.ownerRetries, 1);
+  assert.equal(completed?.totals.eventsPublished, 1);
+});
+
+test("publisher aggregate distinguishes rejection, timeout, and disconnect terminals", async () => {
+  const scenarios = [
+    {
+      url: "wss://rejected.example",
+      connected: true,
+      publish: async () => { throw new Error("blocked"); },
+      outcome: "failed",
+      rejected: 1,
+      timedOut: 0,
+      terminalClosed: 0,
+    },
+    {
+      url: "wss://timeout.example",
+      connected: true,
+      publish: () => new Promise<string>(() => {}),
+      outcome: "timed-out",
+      rejected: 0,
+      timedOut: 1,
+      terminalClosed: 0,
+    },
+    {
+      url: "wss://disconnect.example",
+      connected: false,
+      publish: async () => { throw new Error("connection closed"); },
+      outcome: "failed",
+      rejected: 0,
+      timedOut: 0,
+      terminalClosed: 1,
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const collector = new RelayWorkflowCollector();
+    let flushEvidence: (() => void) | undefined;
+    const dispatcher = new RelayWorkflowEvidenceDispatcher(
+      collector,
+      (task) => { flushEvidence = task; },
+    );
+    assert.deepEqual(await publishNostrEvent(event, [scenario.url], 5, {
+      evidenceDispatcher: dispatcher,
+      connectRelay: async (url) => ({
+        url,
+        connected: scenario.connected,
+        close() {},
+        publish: scenario.publish,
+      }),
+    }), []);
+    flushEvidence?.();
+
+    const aggregate = collector.snapshot()[0];
+    assert.equal(aggregate?.outcome, scenario.outcome);
+    assert.equal(aggregate?.totals.eventsPublished, 1);
+    assert.equal(aggregate?.totals.rejected, scenario.rejected);
+    assert.equal(aggregate?.totals.timedOut, scenario.timedOut);
+    assert.equal(aggregate?.totals.terminalClosed, scenario.terminalClosed);
+    assert.equal(aggregate?.totals.connectionsClosed, 1);
+  }
 });
 
 test("publisher deduplicates normalized targets within each invocation", async () => {

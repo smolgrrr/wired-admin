@@ -1,4 +1,5 @@
 import { RELAY_EVIDENCE_LIMITS } from "../contracts/relay-workflow-evidence.js";
+import type { RelayWorkflowEvidence } from "../contracts/relay-workflow-evidence.js";
 import type { RelayWorkflowEvidenceRecorder } from "./relay-workflow-collector.js";
 
 const MAX_PENDING_EVIDENCE_TASKS = 100;
@@ -47,6 +48,12 @@ export class RelayWorkflowEvidenceDispatcher {
 
   record(evidence: unknown): void {
     this.recorder.record(evidence);
+  }
+
+  recordLateConnectionClosed(
+    key: Pick<RelayWorkflowEvidence, "workflowOwner" | "operation" | "outcome">,
+  ): void {
+    this.recorder.recordLateConnectionClosed?.(key);
   }
 
   private incrementDropped(count = 1): void {

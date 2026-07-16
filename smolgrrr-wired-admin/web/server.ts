@@ -1450,8 +1450,9 @@ if (revenueEnabled) {
       60_000,
       Number(process.env.REVENUE_PAYMENT_NOT_FOUND_GRACE_MS || 86_400_000),
     ),
-    publishReceipt: (event) =>
+    publishReceipt: (event, ownerRetries) =>
       publishNostrEvent(event, wiredAccountRelays, wiredAccountPublishTimeoutMs, {
+        ownerRetries,
         workflowOwner: "wired-admin.server.revenue-receipt-publish",
       }),
   });

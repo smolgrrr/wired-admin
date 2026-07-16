@@ -44,10 +44,11 @@ export function getServerRelayWorkflowEvidenceStatus() {
 
 type PublishSettlement = {
   acceptedUrl?: string;
-  closed: number;
+  connectionClosed: number;
   connectFailed: number;
   explicitRejection: number;
   opened: number;
+  terminalClosed: number;
   timedOut: number;
 };
 
@@ -69,53 +70,64 @@ export async function publishNostrEvent(
   } = options;
   const targets = uniqueRelays(relayUrls);
   const startedAt = evidenceDispatcher ? performance.now() : 0;
+  const lateCleanupTasks: Promise<number>[] = [];
   const settlements = await Promise.all(
     targets.map(async (url): Promise<PublishSettlement> => {
-      const pendingRelay = connectRelay(url);
+      let pendingRelay: Promise<RelayConnection> | undefined;
       let relay: RelayConnection;
       try {
+        pendingRelay = connectRelay(url);
         relay = await withTimeout(pendingRelay, timeoutMs, url);
       } catch (error) {
-        void pendingRelay.then((lateRelay) => {
-          try {
-            lateRelay.close();
-          } catch {
-            // Relay already closed.
-          }
-        }, () => {});
+        if (pendingRelay) {
+          lateCleanupTasks.push(pendingRelay.then((lateRelay) => {
+            try {
+              lateRelay.close();
+              return 1;
+            } catch {
+              return 0;
+            }
+          }, () => 0));
+        }
         return {
-          closed: 0,
+          connectionClosed: 0,
           connectFailed: timedOut(error) ? 0 : 1,
           explicitRejection: 0,
           opened: 0,
+          terminalClosed: 0,
           timedOut: timedOut(error) ? 1 : 0,
         };
       }
+      let settlement: PublishSettlement;
       try {
         await withTimeout(relay.publish(event), timeoutMs, url);
-        return {
+        settlement = {
           acceptedUrl: normalizeRelayUrl(relay.url || url),
-          closed: 0,
+          connectionClosed: 0,
           connectFailed: 0,
           explicitRejection: 0,
           opened: 1,
+          terminalClosed: 0,
           timedOut: 0,
         };
       } catch (error) {
-        return {
-          closed: timedOut(error) || relay.connected !== false ? 0 : 1,
+        settlement = {
+          connectionClosed: 0,
           connectFailed: 0,
           explicitRejection: timedOut(error) || relay.connected === false ? 0 : 1,
           opened: 1,
+          terminalClosed: timedOut(error) || relay.connected !== false ? 0 : 1,
           timedOut: timedOut(error) ? 1 : 0,
         };
       } finally {
         try {
           relay.close();
+          settlement!.connectionClosed = 1;
         } catch {
           // Relay already closed.
         }
       }
+      return settlement;
     }),
   );
 
@@ -134,7 +146,10 @@ export async function publishNostrEvent(
     }
     const primitive = {
       accepted: accepted.length,
-      closed: settlements.reduce((sum, result) => sum + result.closed, 0),
+      connectionClosed: settlements.reduce(
+        (sum, result) => sum + result.connectionClosed,
+        0,
+      ),
       completionMs: completedAt - startedAt,
       connectFailed: settlements.reduce((sum, result) => sum + result.connectFailed, 0),
       eventFrameBytes,
@@ -146,42 +161,47 @@ export async function publishNostrEvent(
       ownerRetries,
       targets: targets.length,
       timedOut: settlements.reduce((sum, result) => sum + result.timedOut, 0),
+      terminalClosed: settlements.reduce(
+        (sum, result) => sum + result.terminalClosed,
+        0,
+      ),
       workflowOwner,
     };
+    const outcome = relayWorkflowOutcome({
+      targets: primitive.targets,
+      successfulTargets: primitive.accepted,
+      timedOut: primitive.timedOut,
+      cancelled: 0,
+    });
     evidenceDispatcher.defer(() => {
-      const confirmedFrames = primitive.accepted + primitive.explicitRejections;
       evidenceDispatcher.record({
         schemaVersion: 1,
         workflowOwner: primitive.workflowOwner,
         operation: "publish",
-        outcome: relayWorkflowOutcome({
-          targets: primitive.targets,
-          successfulTargets: primitive.accepted,
-          timedOut: primitive.timedOut,
-          cancelled: 0,
-        }),
+        outcome,
         work: { attempts: 1, targets: primitive.targets },
         connections: {
           opened: primitive.opened,
-          closed: primitive.opened,
+          closed: primitive.connectionClosed,
           reused: 0,
           lateClosed: 0,
         },
         relay: {
           requestsSent: 0,
-          eventsPublished: confirmedFrames,
+          // Counts client publish invocations, not frames received by a relay.
+          eventsPublished: primitive.opened,
           eventsReceived: 0,
           requestBytes: 0,
           eventBytesSent: Math.min(
             RELAY_EVIDENCE_LIMITS.bytes,
-            primitive.eventFrameBytes * confirmedFrames,
+            primitive.eventFrameBytes * primitive.opened,
           ),
           eventBytesReceived: 0,
         },
         results: { unique: 0, duplicates: 0, coalescedOperations: 0 },
         terminal: {
           eose: 0,
-          closed: primitive.closed,
+          closed: primitive.terminalClosed,
           connectFailed: primitive.connectFailed,
           timedOut: primitive.timedOut,
           cancelled: 0,
@@ -202,6 +222,19 @@ export async function publishNostrEvent(
           ),
         },
       } satisfies RelayWorkflowEvidence);
+    });
+    const lateCleanupKey = {
+      workflowOwner: primitive.workflowOwner,
+      operation: "publish" as const,
+      outcome,
+    };
+    lateCleanupTasks.forEach((task) => {
+      void task.then((closed) => {
+        if (closed === 0) return;
+        evidenceDispatcher.defer(() => {
+          evidenceDispatcher.recordLateConnectionClosed(lateCleanupKey);
+        });
+      });
     });
   }
 

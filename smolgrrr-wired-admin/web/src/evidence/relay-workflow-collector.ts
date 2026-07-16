@@ -28,6 +28,9 @@ type MutableAggregate = RelayWorkflowAggregate;
 
 export type RelayWorkflowEvidenceRecorder = {
   record(evidence: unknown): void;
+  recordLateConnectionClosed?(
+    key: Pick<RelayWorkflowEvidence, "workflowOwner" | "operation" | "outcome">,
+  ): void;
 };
 
 export class RelayWorkflowCollector implements RelayWorkflowEvidenceRecorder {
@@ -106,6 +109,25 @@ export class RelayWorkflowCollector implements RelayWorkflowEvidenceRecorder {
     }
     this.addDuration(aggregate.completionMs, evidence.timingMs.completion);
     this.aggregates.set(key, aggregate);
+  }
+
+  recordLateConnectionClosed(
+    evidenceKey: Pick<
+      RelayWorkflowEvidence,
+      "workflowOwner" | "operation" | "outcome"
+    >,
+  ): void {
+    const key = [
+      evidenceKey.workflowOwner,
+      evidenceKey.operation,
+      evidenceKey.outcome,
+    ].join("|");
+    const aggregate = this.aggregates.get(key);
+    if (!aggregate) return;
+    aggregate.totals.lateConnectionsClosed = this.add(
+      aggregate.totals.lateConnectionsClosed ?? 0,
+      1,
+    );
   }
 
   snapshot(): RelayWorkflowAggregate[] {

@@ -30,7 +30,7 @@ type RevenueServiceOptions = {
   relayUrl: string;
   callbackUrl: string;
   wallet: RevenueWallet;
-  publishReceipt: (event: Event) => Promise<string[]>;
+  publishReceipt: (event: Event, ownerRetries: number) => Promise<string[]>;
   addressResolver?: LightningAddressResolver;
   enrollmentEnabled?: boolean;
   invoicesEnabled?: boolean;
@@ -92,7 +92,8 @@ export class RevenueService {
   readonly #relayUrl: string;
   readonly #callbackUrl: string;
   readonly #wallet: RevenueWallet;
-  readonly #publishReceipt: (event: Event) => Promise<string[]>;
+  readonly #publishReceipt: (event: Event, ownerRetries: number) => Promise<string[]>;
+  readonly #receiptPublishAttempts = new Map<string, number>();
   readonly #addressResolver: LightningAddressResolver;
   readonly #enrollmentEnabled: boolean;
   readonly #invoicesEnabled: boolean;
@@ -144,6 +145,19 @@ export class RevenueService {
       callbackUrl: this.#callbackUrl,
       walletBackend: this.#wallet.backend,
     };
+  }
+
+  async #publishReceiptWithOwnerRetry(event: Event): Promise<string[]> {
+    const ownerRetries = this.#receiptPublishAttempts.get(event.id) ?? 0;
+    if (!this.#receiptPublishAttempts.has(event.id) &&
+      this.#receiptPublishAttempts.size >= 1_000) {
+      const oldest = this.#receiptPublishAttempts.keys().next().value;
+      if (oldest) this.#receiptPublishAttempts.delete(oldest);
+    }
+    this.#receiptPublishAttempts.set(event.id, ownerRetries + 1);
+    const acceptedRelays = await this.#publishReceipt(event, ownerRetries);
+    if (acceptedRelays.length > 0) this.#receiptPublishAttempts.delete(event.id);
+    return acceptedRelays;
   }
 
   operatorStatus(): ReturnType<RevenueLedger["status"]> & {
@@ -367,7 +381,7 @@ export class RevenueService {
     }
     if (!invoice.receipt) throw new Error("settled invoice receipt is missing");
     if (!invoice.receiptPublished) {
-      const acceptedRelays = await this.#publishReceipt(invoice.receipt);
+      const acceptedRelays = await this.#publishReceiptWithOwnerRetry(invoice.receipt);
       if (acceptedRelays.length === 0) throw new Error("no relay accepted the zap receipt");
       invoice = this.#ledger.markReceiptPublished(paymentHash);
     }
@@ -401,7 +415,7 @@ export class RevenueService {
     for (const invoice of this.#ledger.unpublishedReceipts()) {
       try {
         if (!invoice.receipt) continue;
-        const acceptedRelays = await this.#publishReceipt(invoice.receipt);
+        const acceptedRelays = await this.#publishReceiptWithOwnerRetry(invoice.receipt);
         if (acceptedRelays.length === 0) throw new Error("no relay accepted the zap receipt");
         this.#ledger.markReceiptPublished(invoice.paymentHash);
         result.publishedReceipts += 1;
@@ -539,6 +553,7 @@ export class RevenueService {
   }
 
   close(): void {
+    this.#receiptPublishAttempts.clear();
     this.#ledger.close();
   }
 
