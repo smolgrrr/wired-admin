@@ -23,6 +23,8 @@ The destination enforces the `wired-admin` service identity, fixed owner/status 
 2. Configure the endpoint and independent token, enable export at 10% of sealed aggregate windows, and verify accepted responses plus unchanged refresh/publish/API completion evidence for one deployment window.
 3. Increase to 100% only while result identity and controlled p95 remain unchanged.
 
+Run `npm run test:relay-audit` from `smolgrrr-wired-admin/web` before rollout. It isolates the interleaved publication comparison from unrelated CPU-heavy tests and enforces both the absolute 21 ms p95 ceiling and the disabled-plus-5 ms instrumentation bound. The ordinary full suite still checks every accepted-relay result in all 100 comparison runs.
+
 Set `RELAY_WORKFLOW_STATUS_EXPORT_PERCENT=0` or `RELAY_WORKFLOW_STATUS_EXPORT_ENABLED=false` for immediate rollback. The collector can be disabled separately with `RELAY_WORKFLOW_EVIDENCE_ENABLED=off`. Missing credentials, queue overflow, timeout, network failure, non-2xx response, or ingest outage drops status evidence only; refresh, publishing, and API completion never await export.
 
 To delete a run, disable this exporter first, then have the named Wired deployment owner delete the private objects under `relay-workflow-status/v1/`. Re-enable only after identity, caps, retention, and access are reconfirmed.
