@@ -147,6 +147,7 @@ test("admin sink uses the configured service identity and navigation-independent
   assert.equal(new Headers(request?.init?.headers).get("authorization"), "Bearer operator-secret");
   assert.ok(request?.init?.signal instanceof AbortSignal);
   assert.equal(request?.init?.method, "POST");
+  assert.equal(request?.init?.redirect, "error");
 });
 
 test("admin export rollout is explicit, credentialed, and percentage bounded", () => {
@@ -160,6 +161,52 @@ test("admin export rollout is explicit, credentialed, and percentage bounded", (
   assert.equal(adminWorkflowStatusExportEnabled(env, 0.1), false);
   assert.equal(adminWorkflowStatusExportEnabled({ ...env, WORKFLOW_STATUS_ADMIN_TOKEN: "" }, 0), false);
   assert.equal(adminWorkflowStatusExportEnabled({ ...env, RELAY_WORKFLOW_STATUS_EXPORT_ENABLED: "off" }, 0), false);
+  assert.equal(adminWorkflowStatusExportEnabled({
+    ...env,
+    RELAY_WORKFLOW_STATUS_ENDPOINT: "http://wired.example/api/workflow-status",
+  }, 0), false);
+  assert.equal(adminWorkflowStatusExportEnabled({
+    ...env,
+    RELAY_WORKFLOW_STATUS_ENDPOINT: "not a url",
+  }, 0), false);
+});
+
+test("admin sink rejects plaintext before sending credentials", async () => {
+  let requests = 0;
+  const sink = createAdminWorkflowStatusSink({
+    endpoint: "http://wired.example/api/workflow-status",
+    token: "operator-secret",
+    fetchImpl: async () => {
+      requests += 1;
+      return new Response(null, { status: 202 });
+    },
+  });
+  await assert.rejects(sink(envelope()), /approved HTTPS ingest/);
+  assert.equal(requests, 0);
+
+  let disabledCalls = 0;
+  const disabled = new RelayWorkflowStatusExporter(async () => {
+    disabledCalls += 1;
+  }, { enabled: false });
+  disabled.enqueue(envelope());
+  assert.equal(disabledCalls, 0);
+  assert.deepEqual(disabled.status, { enabled: false, pending: 0, dropped: 0 });
+});
+
+test("admin rollout samples each sealed aggregate window", () => {
+  const collector = new RelayWorkflowCollector();
+  const exporter = new RelayWorkflowStatusExporter(async () => {}, { schedule: () => {} });
+  const decisions = [false, true];
+  const adapter = new AdminRelayWorkflowStatusAdapter(collector, exporter, {
+    shouldExport: () => decisions.shift() ?? false,
+  });
+
+  collector.record(evidence);
+  adapter.flushNow();
+  assert.equal(exporter.status.pending, 0);
+  collector.record(evidence);
+  adapter.flushNow();
+  assert.equal(exporter.status.pending, 1);
 });
 
 test("hung export cannot delay or change publication completion", async () => {

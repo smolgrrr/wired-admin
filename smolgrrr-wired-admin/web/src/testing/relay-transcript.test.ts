@@ -276,11 +276,13 @@ test("publisher collection modes preserve results and controlled p95", async () 
     },
   ];
   const p95ByVariant = new Map<string, number>();
+  const latenciesByVariant = new Map(
+    variants.map((variant) => [variant.name, [] as number[]]),
+  );
 
   try {
-    for (const variant of variants) {
-      const latencies: number[] = [];
-      for (let run = 0; run < 20; run += 1) {
+    for (let run = 0; run < 20; run += 1) {
+      for (const variant of variants) {
         const workflow = session.beginWorkflow(`${variant.name}-${run}`);
         assert.deepEqual(await publishNostrEvent(
           event,
@@ -289,13 +291,19 @@ test("publisher collection modes preserve results and controlled p95", async () 
           { evidenceDispatcher: variant.dispatcher },
         ), [accept.url]);
         workflow.complete();
-        latencies.push(session.summary(workflow).completionLatencyMs);
+        latenciesByVariant.get(variant.name)?.push(
+          session.summary(workflow).completionLatencyMs,
+        );
       }
+    }
+    for (const variant of variants) {
+      const latencies = latenciesByVariant.get(variant.name) ?? [];
       const sorted = [...latencies].sort((left, right) => left - right);
       p95ByVariant.set(variant.name, sorted[Math.ceil(sorted.length * 0.95) - 1] ?? 0);
     }
 
     const disabledP95 = p95ByVariant.get("disabled") ?? 0;
+    assert.equal([...p95ByVariant.values()].every((p95) => p95 <= 21), true);
     assert.equal(
       [...p95ByVariant.values()].every((p95) => p95 <= disabledP95 + 5),
       true,

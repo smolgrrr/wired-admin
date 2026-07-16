@@ -42,18 +42,21 @@ const workflowCollector = new RelayWorkflowCollector({
   onChange: () => { scheduleWorkflowStatusExport(); },
 });
 const workflowDispatcher = new RelayWorkflowEvidenceDispatcher(workflowCollector);
-const workflowStatusExportEnabled = adminWorkflowStatusExportEnabled();
+const workflowStatusExportConfigured = adminWorkflowStatusExportEnabled(process.env, 0);
 const workflowStatusExporter = new RelayWorkflowStatusExporter(
   createAdminWorkflowStatusSink({
     endpoint: String(process.env.RELAY_WORKFLOW_STATUS_ENDPOINT ?? "").trim(),
     token: String(process.env.WORKFLOW_STATUS_ADMIN_TOKEN ?? "").trim(),
   }),
-  { enabled: workflowStatusExportEnabled },
+  { enabled: workflowStatusExportConfigured },
 );
 const workflowStatusAdapter = new AdminRelayWorkflowStatusAdapter(
   workflowCollector,
   workflowStatusExporter,
-  { enabled: workflowStatusExportEnabled },
+  {
+    enabled: workflowStatusExportConfigured,
+    shouldExport: () => adminWorkflowStatusExportEnabled(),
+  },
 );
 scheduleWorkflowStatusExport = () => { workflowStatusAdapter.schedule(); };
 

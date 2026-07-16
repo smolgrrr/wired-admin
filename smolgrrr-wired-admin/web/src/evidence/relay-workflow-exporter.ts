@@ -103,6 +103,7 @@ export class RelayWorkflowStatusExporter {
 
 type AdapterOptions = {
   enabled?: boolean;
+  shouldExport?: () => boolean;
   flushIntervalMs?: number;
   now?: () => number;
   setTimer?: (task: () => void, delayMs: number) => NodeJS.Timeout;
@@ -114,6 +115,7 @@ export class AdminRelayWorkflowStatusAdapter {
   private readonly enabled: boolean;
   private readonly flushIntervalMs: number;
   private readonly now: () => number;
+  private readonly shouldExport: () => boolean;
   private readonly setTimer: NonNullable<AdapterOptions["setTimer"]>;
   private readonly clearTimer: NonNullable<AdapterOptions["clearTimer"]>;
 
@@ -122,6 +124,7 @@ export class AdminRelayWorkflowStatusAdapter {
     private readonly exporter: RelayWorkflowStatusExporter,
     {
       enabled = true,
+      shouldExport = () => true,
       flushIntervalMs = 30_000,
       now = Date.now,
       setTimer = (task, delayMs) => setTimeout(task, delayMs),
@@ -131,6 +134,7 @@ export class AdminRelayWorkflowStatusAdapter {
     this.enabled = enabled;
     this.flushIntervalMs = flushIntervalMs;
     this.now = now;
+    this.shouldExport = shouldExport;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
   }
@@ -152,6 +156,12 @@ export class AdminRelayWorkflowStatusAdapter {
     }
     const aggregates = this.collector.drain();
     if (aggregates.length === 0) return;
+    try {
+      if (!this.shouldExport()) return;
+    } catch {
+      this.exporter.recordDrop();
+      return;
+    }
     const collectedAt = this.now();
     let chunk: typeof aggregates = [];
     for (const aggregate of aggregates) {
@@ -205,6 +215,9 @@ export function createAdminWorkflowStatusSink({
   timeoutMs = 5_000,
 }: AdminSinkOptions): WorkflowStatusSink {
   return async (envelope) => {
+    if (!isApprovedWorkflowStatusEndpoint(endpoint)) {
+      throw new Error("workflow status endpoint must be approved HTTPS ingest");
+    }
     const response = await fetchImpl(endpoint, {
       method: "POST",
       headers: {
@@ -213,9 +226,22 @@ export function createAdminWorkflowStatusSink({
       },
       body: JSON.stringify(envelope),
       signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
+      redirect: "error",
     });
     if (!response.ok) throw new Error(`workflow status ingest failed: ${response.status}`);
   };
+}
+
+function isApprovedWorkflowStatusEndpoint(value: string): boolean {
+  try {
+    const endpoint = new URL(value);
+    return endpoint.protocol === "https:" &&
+      endpoint.username === "" && endpoint.password === "" &&
+      endpoint.pathname === "/api/workflow-status" &&
+      endpoint.search === "" && endpoint.hash === "";
+  } catch {
+    return false;
+  }
 }
 
 export function adminWorkflowStatusExportEnabled(
@@ -225,7 +251,9 @@ export function adminWorkflowStatusExportEnabled(
   if (String(env.RELAY_WORKFLOW_STATUS_EXPORT_ENABLED ?? "").trim().toLowerCase() !== "true") {
     return false;
   }
-  if (!String(env.RELAY_WORKFLOW_STATUS_ENDPOINT ?? "").trim() ||
+  if (!isApprovedWorkflowStatusEndpoint(
+    String(env.RELAY_WORKFLOW_STATUS_ENDPOINT ?? "").trim(),
+  ) ||
     !String(env.WORKFLOW_STATUS_ADMIN_TOKEN ?? "").trim()) return false;
   const parsed = Number(env.RELAY_WORKFLOW_STATUS_EXPORT_PERCENT ?? 0);
   const percentage = Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : 0;
