@@ -39,7 +39,19 @@ export function getServerRelayWorkflowEvidence() {
 }
 
 export function getServerRelayWorkflowEvidenceStatus() {
-  return workflowDispatcher.status;
+  return {
+    ...workflowDispatcher.status,
+    enabled: serverRelayWorkflowEvidenceEnabled(),
+  };
+}
+
+export function serverRelayWorkflowEvidenceEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const configured = String(env.RELAY_WORKFLOW_EVIDENCE_ENABLED ?? "")
+    .trim()
+    .toLowerCase();
+  return !["0", "false", "off"].includes(configured);
 }
 
 type PublishSettlement = {
@@ -64,10 +76,13 @@ export async function publishNostrEvent(
 ): Promise<string[]> {
   const {
     connectRelay = Relay.connect,
-    evidenceDispatcher = workflowDispatcher,
+    evidenceDispatcher: configuredEvidenceDispatcher,
     ownerRetries = 0,
     workflowOwner = "wired-admin.server.wired-account-publish",
   } = options;
+  const evidenceDispatcher = configuredEvidenceDispatcher === undefined
+    ? serverRelayWorkflowEvidenceEnabled() ? workflowDispatcher : null
+    : configuredEvidenceDispatcher;
   const targets = uniqueRelays(relayUrls);
   const startedAt = evidenceDispatcher ? performance.now() : 0;
   const lateCleanupTasks: Promise<number>[] = [];

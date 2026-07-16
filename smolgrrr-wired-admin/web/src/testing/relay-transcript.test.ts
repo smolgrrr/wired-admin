@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { finalizeEvent, Relay } from "nostr-tools";
 import {
+  getServerRelayWorkflowEvidence,
   publishNostrEvent,
   type RelayConnector,
 } from "../nostr-publisher.js";
@@ -287,6 +288,29 @@ test("publisher collection modes preserve results and controlled p95", async () 
     }
   } finally {
     await Promise.all([accept.close(), reject.close()]);
+  }
+});
+
+test("production evidence collection can be disabled without changing publication", async () => {
+  const previous = process.env.RELAY_WORKFLOW_EVIDENCE_ENABLED;
+  const before = getServerRelayWorkflowEvidence();
+  process.env.RELAY_WORKFLOW_EVIDENCE_ENABLED = "off";
+  try {
+    assert.deepEqual(await publishNostrEvent(event, ["wss://disabled.example"], 25, {
+      connectRelay: async (url) => ({
+        url,
+        close() {},
+        async publish() { return "accepted"; },
+      }),
+    }), ["wss://disabled.example"]);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(getServerRelayWorkflowEvidence(), before);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.RELAY_WORKFLOW_EVIDENCE_ENABLED;
+    } else {
+      process.env.RELAY_WORKFLOW_EVIDENCE_ENABLED = previous;
+    }
   }
 });
 
