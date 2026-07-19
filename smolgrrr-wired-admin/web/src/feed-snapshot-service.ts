@@ -20,6 +20,10 @@ import type {
 } from "./contracts/nostr.js";
 import type { ModerationService } from "./moderation.js";
 import { isNostrEvent, parseFeedBootstrapSnapshot } from "./contracts/validation.js";
+import {
+  withFiniteRelaySession,
+  type FiniteRelaySession,
+} from "./server-relay-session.js";
 
 type ConnectedRelay = Awaited<ReturnType<typeof Relay.connect>>;
 
@@ -52,11 +56,13 @@ const initialFeedRootLimit = 30;
 const initialFeedRepliesPerRootLimit = 12;
 
 type FetchReplyClosureOptions = {
-  relays: ConnectedRelay[];
   parentIds: string[];
   relayUrls: RelayUrl[];
   knownEventIds?: Set<string>;
-};
+} & (
+  | { session: FiniteRelaySession; relays?: never }
+  | { relays: ConnectedRelay[]; session?: never }
+);
 
 type RootRefCandidate = {
   ref: ReferencedEventRef;
@@ -607,7 +613,32 @@ export function createFeedSnapshotService({
     return { events, relayHintsByEventId };
   }
 
-  async function fetchReplyClosure({ relays, parentIds, relayUrls, knownEventIds = new Set() }: FetchReplyClosureOptions): Promise<RelayBatch> {
+  async function querySessionOnce(
+    session: FiniteRelaySession,
+    filter: Filter,
+    relayUrls?: RelayUrl[],
+  ): Promise<RelayBatch> {
+    const events: NostrEvent[] = [];
+    const seenIds = new Set<string>();
+    const relayHintsByEventId: RelayHintsByEventId = new Map();
+
+    await session.query({
+      filters: [filter],
+      ...(relayUrls ? { relayUrls } : {}),
+      deadlineMs: timeoutMs,
+      onEvent(event, relayUrl) {
+        if (!isNostrEvent(event)) return;
+        addRelayHint(relayHintsByEventId, event.id, relayUrl);
+        if (seenIds.has(event.id)) return;
+        seenIds.add(event.id);
+        events.push(event);
+      },
+    });
+
+    return { events, relayHintsByEventId };
+  }
+
+  async function fetchReplyClosure({ session, relays, parentIds, relayUrls, knownEventIds = new Set() }: FetchReplyClosureOptions): Promise<RelayBatch> {
     const replyEvents: NostrEvent[] = [];
     const seenReplyIds = new Set<string>();
     const replyRelayHintsByEventId: RelayHintsByEventId = new Map();
@@ -621,7 +652,9 @@ export function createFeedSnapshotService({
         const replyFilter = buildReplyFilter(parentChunk, since, replyLimit);
         if (!replyFilter) continue;
 
-        const replyBatch = await subscribeOnce(relays, replyFilter, relayUrls);
+        const replyBatch = session
+          ? await querySessionOnce(session, replyFilter, relayUrls)
+          : await subscribeOnce(relays, replyFilter, relayUrls);
 
         replyBatch.relayHintsByEventId.forEach((relaysForEvent, eventId) => {
           relaysForEvent.forEach((relay) => addRelayHint(replyRelayHintsByEventId, eventId, relay));
@@ -644,6 +677,7 @@ export function createFeedSnapshotService({
   }
 
   async function fetchEventsByRefs(
+    session: FiniteRelaySession,
     refs: ReferencedEventRef[],
     baseRelayUrls: RelayUrl[],
     knownEventIds: Set<string> = new Set(),
@@ -662,24 +696,20 @@ export function createFeedSnapshotService({
       ...baseRelayUrls,
       ...missingRefs.flatMap((ref) => ref.relays),
     ]);
-    const relays = await connectRelays(relayUrls);
-
-    try {
-      return await subscribeOnce(
-        relays,
-        {
-          ids: missingRefs.map((ref) => ref.id),
-          kinds: [1],
-          limit: missingRefs.length,
-        },
-        relayUrls,
-      );
-    } finally {
-      closeRelays(relays);
-    }
+    await session.ensureRelays(relayUrls, timeoutMs);
+    return querySessionOnce(
+      session,
+      {
+        ids: missingRefs.map((ref) => ref.id),
+        kinds: [1],
+        limit: missingRefs.length,
+      },
+      relayUrls,
+    );
   }
 
   async function resolveRootRefsForActivity(
+    session: FiniteRelaySession,
     activityEvents: NostrEvent[],
     seedEvents: NostrEvent[],
   ): Promise<RelayBatch & { rootRefs: ReferencedEventRef[] }> {
@@ -721,6 +751,7 @@ export function createFeedSnapshotService({
       resolved.nextMissingRefs.forEach((ref) => attemptedIds.add(ref.id));
 
       const batch = await fetchEventsByRefs(
+        session,
         resolved.nextMissingRefs,
         uniqueRelays([...threadRelays, ...enrichmentRelays]),
         new Set(eventById.keys()),
@@ -741,66 +772,69 @@ export function createFeedSnapshotService({
   }
 
   async function fetchGlobalFeedEvents(): Promise<RelayBatch> {
-    const relays = await connectRelays(uniqueRelays([...threadRelays, ...powRelays]));
-    try {
-      const since = sinceFromAgeHours(ageHours);
-      const activityBatch = await subscribeOnce(
-        relays,
-        { kinds: [1], since, limit: 500 },
-        powRelays,
-      );
-      const qualifyingActivityEvents = activityBatch.events.filter(
-        (event) => event.kind === 1 && eventPow(event) >= minPow,
-      );
-      const rootResolutionBatch = await resolveRootRefsForActivity(
-        qualifyingActivityEvents,
-        activityBatch.events,
-      );
-      const knownEventIds = new Set(
-        mergeEvents(activityBatch.events, rootResolutionBatch.events).map((event) =>
-          normalizeEventId(event.id),
-        ),
-      );
-      const rootBatch = await fetchEventsByRefs(
-        rootResolutionBatch.rootRefs,
-        uniqueRelays([...threadRelays, ...enrichmentRelays]),
-        knownEventIds,
-      );
-      rootBatch.events.forEach((event) => knownEventIds.add(normalizeEventId(event.id)));
-
-      const eventById = buildEventById(
-        mergeEvents(activityBatch.events, rootResolutionBatch.events, rootBatch.events),
-      );
-      const rootIds = prioritizeRootIds(
-        rootResolutionBatch.rootRefs.map((ref) => ref.id),
-        qualifyingActivityEvents,
-        eventById,
-        rootResolutionDepth,
-      );
-      const replyBatch = await fetchReplyClosure({
-        relays,
-        parentIds: rootIds,
-        relayUrls: threadRelays,
-        knownEventIds,
-      });
-
-      return {
-        events: mergeEvents(
+    const relayUrls = uniqueRelays([...threadRelays, ...powRelays]);
+    return withFiniteRelaySession(
+      { relayUrls, connectDeadlineMs: timeoutMs },
+      async (session) => {
+        const since = sinceFromAgeHours(ageHours);
+        const activityBatch = await querySessionOnce(
+          session,
+          { kinds: [1], since, limit: 500 },
+          powRelays,
+        );
+        const qualifyingActivityEvents = activityBatch.events.filter(
+          (event) => event.kind === 1 && eventPow(event) >= minPow,
+        );
+        const rootResolutionBatch = await resolveRootRefsForActivity(
+          session,
+          qualifyingActivityEvents,
           activityBatch.events,
-          rootResolutionBatch.events,
-          rootBatch.events,
-          replyBatch.events,
-        ),
-        relayHintsByEventId: mergeRelayHints(
-          activityBatch.relayHintsByEventId,
-          rootResolutionBatch.relayHintsByEventId,
-          rootBatch.relayHintsByEventId,
-          replyBatch.relayHintsByEventId,
-        ),
-      };
-    } finally {
-      closeRelays(relays);
-    }
+        );
+        const knownEventIds = new Set(
+          mergeEvents(activityBatch.events, rootResolutionBatch.events).map((event) =>
+            normalizeEventId(event.id),
+          ),
+        );
+        const rootBatch = await fetchEventsByRefs(
+          session,
+          rootResolutionBatch.rootRefs,
+          uniqueRelays([...threadRelays, ...enrichmentRelays]),
+          knownEventIds,
+        );
+        rootBatch.events.forEach((event) => knownEventIds.add(normalizeEventId(event.id)));
+
+        const eventById = buildEventById(
+          mergeEvents(activityBatch.events, rootResolutionBatch.events, rootBatch.events),
+        );
+        const rootIds = prioritizeRootIds(
+          rootResolutionBatch.rootRefs.map((ref) => ref.id),
+          qualifyingActivityEvents,
+          eventById,
+          rootResolutionDepth,
+        );
+        const replyBatch = await fetchReplyClosure({
+          session,
+          parentIds: rootIds,
+          relayUrls: threadRelays,
+          knownEventIds,
+        });
+
+        return {
+          events: mergeEvents(
+            activityBatch.events,
+            rootResolutionBatch.events,
+            rootBatch.events,
+            replyBatch.events,
+          ),
+          relayHintsByEventId: mergeRelayHints(
+            activityBatch.relayHintsByEventId,
+            rootResolutionBatch.relayHintsByEventId,
+            rootBatch.relayHintsByEventId,
+            replyBatch.relayHintsByEventId,
+          ),
+        };
+      },
+    );
   }
 
   function workScoreBreakdown(event: NostrEvent, replies: NostrEvent[]) {
