@@ -623,3 +623,121 @@ test("feed snapshot reuses activity connections while resolving a missing root",
     await rm(temporaryDirectory, { force: true, recursive: true });
   }
 });
+
+test("feed snapshot queries hints only for references missing from configured coverage", async () => {
+  const temporaryDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "wired-feed-targeted-hints-"),
+  );
+  const harnesses: RelayTranscriptHarness[] = [];
+
+  try {
+    const session = new RelayTranscriptSession();
+    const configuredReference = finalizeEvent(
+      {
+        created_at: 2_000_000_050,
+        kind: 1,
+        tags: [],
+        content: "configured admin reference",
+      },
+      new Uint8Array(32).fill(83),
+    );
+    const hintedReference = finalizeEvent(
+      {
+        created_at: 2_000_000_051,
+        kind: 1,
+        tags: [],
+        content: "hinted admin reference",
+      },
+      new Uint8Array(32).fill(84),
+    );
+    let referenceRoot: ReturnType<typeof finalizeEvent>;
+    const configuredHarness = await RelayTranscriptHarness.listen({
+      session,
+      onRequest(request) {
+        const [filter] = request.filters;
+        if (filter?.ids?.includes(configuredReference.id)) {
+          request.sendEvent(configuredReference);
+        } else if (filter?.kinds?.includes(1) && !filter.ids && !filter["#e"]) {
+          request.sendEvent(referenceRoot);
+        }
+        request.sendEose();
+      },
+    });
+    const hintedHarness = await RelayTranscriptHarness.listen({
+      session,
+      onRequest(request) {
+        if (request.filters[0]?.ids?.includes(hintedReference.id)) {
+          request.sendEvent(hintedReference);
+        }
+        request.sendEose();
+      },
+    });
+    harnesses.push(configuredHarness, hintedHarness);
+    referenceRoot = finalizeEvent(
+      {
+        created_at: 2_000_000_052,
+        kind: 1,
+        tags: [],
+        content: [configuredReference, hintedReference]
+          .map(
+            (event) =>
+              `nostr:${nip19.neventEncode({
+                id: event.id,
+                relays: [hintedHarness.url],
+              })}`,
+          )
+          .join(" "),
+      },
+      new Uint8Array(32).fill(85),
+    );
+    const service = createFeedSnapshotService({
+      cacheFile: path.join(temporaryDirectory, "feed.json"),
+      refreshSeconds: 300,
+      ageHours: 24,
+      timeoutMs: 1_000,
+      replyLimit: 100,
+      replyFetchDepth: 2,
+      minPow: 0,
+      powRelays: [configuredHarness.url],
+      enrichmentRelays: [configuredHarness.url],
+      threadRelays: [configuredHarness.url],
+      moderation: createModerationService(
+        path.join(temporaryDirectory, "moderation.json"),
+      ),
+    });
+
+    const workflow = session.beginWorkflow("admin-feed-targeted-hints");
+    const snapshot = await service.refresh();
+    await session.waitFor(
+      (entries) =>
+        entries.filter((entry) => entry.type === "connection-closed").length >=
+        4,
+    );
+    workflow.complete();
+
+    assert.deepEqual(
+      Object.keys(snapshot.eventsById).sort(),
+      [referenceRoot.id, configuredReference.id, hintedReference.id].sort(),
+    );
+    const referenceRequests = session.entries
+      .slice(workflow.startIndex, workflow.completedIndex)
+      .filter((entry) => entry.type === "request")
+      .filter((entry) => entry.filters[0]?.ids);
+    assert.equal(referenceRequests.length, 2);
+    assert.deepEqual(referenceRequests[0]?.filters, [
+      {
+        ids: [configuredReference.id, hintedReference.id],
+        kinds: [1],
+        limit: 2,
+      },
+    ]);
+    assert.equal(referenceRequests[0]?.relayUrl, configuredHarness.url);
+    assert.deepEqual(referenceRequests[1]?.filters, [
+      { ids: [hintedReference.id], kinds: [1], limit: 1 },
+    ]);
+    assert.equal(referenceRequests[1]?.relayUrl, hintedHarness.url);
+  } finally {
+    await Promise.all(harnesses.map((harness) => harness.close()));
+    await rm(temporaryDirectory, { force: true, recursive: true });
+  }
+});

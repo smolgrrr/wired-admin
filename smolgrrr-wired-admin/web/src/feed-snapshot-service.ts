@@ -943,70 +943,119 @@ export function createFeedSnapshotService({
       return { events: [], relayHintsByEventId: new Map() };
     }
 
-    const relayUrls = uniqueRelays([
-      ...threadRelays,
-      ...missingRefs.flatMap((ref) => ref.relays),
-    ]);
-    const relays = await connectRelays(relayUrls);
+    const configuredRelayUrls = uniqueRelays(threadRelays);
+    const hintedRelayUrls = uniqueRelays(
+      missingRefs.flatMap((ref) => ref.relays),
+    ).filter((relayUrl) => !configuredRelayUrls.includes(relayUrl));
+    const relayUrls = uniqueRelays([...configuredRelayUrls, ...hintedRelayUrls]);
 
-    try {
-      const referencedBatch = await subscribeOnce(
-        relays,
-        {
-          ids: missingRefs.map((ref) => ref.id),
-          kinds: [1],
-          limit: missingRefs.length,
-        },
-        relayUrls,
-      );
+    return withFiniteRelaySession(
+      { relayUrls: configuredRelayUrls, connectDeadlineMs: timeoutMs },
+      async (session) => {
+        const hintedConnections = session.ensureRelays(hintedRelayUrls, timeoutMs);
+        const configuredBatch = await querySessionOnce(
+          session,
+          {
+            ids: missingRefs.map((ref) => ref.id),
+            kinds: [1],
+            limit: missingRefs.length,
+          },
+          configuredRelayUrls,
+        );
+        const foundIds = new Set(
+          configuredBatch.events.map((event) => normalizeEventId(event.id)),
+        );
+        const stillMissingRefs = missingRefs.filter(
+          (ref) => !foundIds.has(normalizeEventId(ref.id)),
+        );
+        const hintedBatches: RelayBatch[] = [];
 
-      const replyBatch = await fetchReplyClosure({
-        relays,
-        parentIds: referencedBatch.events.map((event) => event.id),
-        relayUrls,
-        knownEventIds,
-      });
+        if (stillMissingRefs.length > 0 && hintedRelayUrls.length > 0) {
+          await hintedConnections;
+          const missingIdsByRelay = new Map<RelayUrl, string[]>();
+          stillMissingRefs.forEach((ref) => {
+            uniqueRelays(ref.relays).forEach((relayUrl) => {
+              if (!hintedRelayUrls.includes(relayUrl)) return;
+              const ids = missingIdsByRelay.get(relayUrl) || [];
+              if (!ids.includes(ref.id)) ids.push(ref.id);
+              missingIdsByRelay.set(relayUrl, ids);
+            });
+          });
+          hintedBatches.push(
+            ...(await Promise.all(
+              [...missingIdsByRelay].map(([relayUrl, ids]) =>
+                querySessionOnce(
+                  session,
+                  { ids, kinds: [1], limit: ids.length },
+                  [relayUrl],
+                ),
+              ),
+            )),
+          );
+        }
 
-      return {
-        events: mergeEvents(referencedBatch.events, replyBatch.events),
-        relayHintsByEventId: mergeRelayHints(
-          referencedBatch.relayHintsByEventId,
-          replyBatch.relayHintsByEventId,
-        ),
-      };
-    } finally {
-      closeRelays(relays);
-    }
+        const referencedBatch: RelayBatch = {
+          events: mergeEvents(
+            configuredBatch.events,
+            ...hintedBatches.map((batch) => batch.events),
+          ),
+          relayHintsByEventId: mergeRelayHints(
+            configuredBatch.relayHintsByEventId,
+            ...hintedBatches.map((batch) => batch.relayHintsByEventId),
+          ),
+        };
+        const replyBatch = await fetchReplyClosure({
+          session,
+          parentIds: referencedBatch.events.map((event) => event.id),
+          relayUrls,
+          knownEventIds,
+        });
+
+        return {
+          events: mergeEvents(referencedBatch.events, replyBatch.events),
+          relayHintsByEventId: mergeRelayHints(
+            referencedBatch.relayHintsByEventId,
+            replyBatch.relayHintsByEventId,
+          ),
+        };
+      },
+    );
   }
 
   async function fetchProfileMetadata(pubkeys: Pubkey[]): Promise<Record<Pubkey, ProfileSummary>> {
     if (pubkeys.length === 0) return {};
-    const relays = await connectRelays(threadRelays);
-    try {
-      const { events } = await subscribeOnce(
-        relays,
-        {
-          authors: pubkeys,
-          kinds: [0],
-          limit: Math.min(pubkeys.length, 250),
-        },
-        threadRelays,
-      );
-      const profiles: Record<Pubkey, { profile: ProfileSummary; createdAt: number }> = {};
-      events.forEach((event) => {
-        const profile = parseProfileEvent(event);
-        if (!profile) return;
-        const existing = profiles[event.pubkey];
-        if (existing && existing.createdAt >= event.created_at) return;
-        profiles[event.pubkey] = { profile, createdAt: event.created_at };
-      });
+    return withFiniteRelaySession(
+      { relayUrls: threadRelays, connectDeadlineMs: timeoutMs },
+      async (session) => {
+        const { events } = await querySessionOnce(
+          session,
+          {
+            authors: pubkeys,
+            kinds: [0],
+            limit: Math.min(pubkeys.length, 250),
+          },
+          threadRelays,
+        );
+        const profiles: Record<
+          Pubkey,
+          { profile: ProfileSummary; createdAt: number }
+        > = {};
+        events.forEach((event) => {
+          const profile = parseProfileEvent(event);
+          if (!profile) return;
+          const existing = profiles[event.pubkey];
+          if (existing && existing.createdAt >= event.created_at) return;
+          profiles[event.pubkey] = { profile, createdAt: event.created_at };
+        });
 
-      return Object.fromEntries(
-        Object.entries(profiles).map(([pubkey, entry]) => [pubkey, entry.profile]),
-      );
-    } finally {
-      closeRelays(relays);
-    }
+        return Object.fromEntries(
+          Object.entries(profiles).map(([pubkey, entry]) => [
+            pubkey,
+            entry.profile,
+          ]),
+        );
+      },
+    );
   }
 
   async function loadFromDisk(): Promise<void> {
