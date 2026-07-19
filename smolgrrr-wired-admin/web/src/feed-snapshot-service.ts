@@ -1,6 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { nip19, Relay, type Filter } from "nostr-tools";
+import { nip19, type Filter } from "nostr-tools";
 import { eventPow } from "./pow.js";
 import { normalizeRelayUrl, normalizeUrl, uniqueRelays } from "./utils.js";
 import type {
@@ -25,12 +25,6 @@ import {
   type FiniteRelaySession,
 } from "./server-relay-session.js";
 
-type ConnectedRelay = Awaited<ReturnType<typeof Relay.connect>>;
-
-type SubscriptionLike = {
-  close: () => void;
-};
-
 type RelayBatch = {
   events: NostrEvent[];
   relayHintsByEventId: RelayHintsByEventId;
@@ -48,6 +42,7 @@ type FeedSnapshotServiceOptions = {
   enrichmentRelays: RelayUrl[];
   threadRelays: RelayUrl[];
   moderation: ModerationService;
+  persistSnapshot?: (snapshot: FeedBootstrapSnapshot | null) => Promise<void>;
 };
 
 const replyParentBatchSize = 50;
@@ -56,13 +51,11 @@ const initialFeedRootLimit = 30;
 const initialFeedRepliesPerRootLimit = 12;
 
 type FetchReplyClosureOptions = {
+  session: FiniteRelaySession;
   parentIds: string[];
   relayUrls: RelayUrl[];
   knownEventIds?: Set<string>;
-} & (
-  | { session: FiniteRelaySession; relays?: never }
-  | { relays: ConnectedRelay[]; session?: never }
-);
+};
 
 type RootRefCandidate = {
   ref: ReferencedEventRef;
@@ -371,29 +364,6 @@ function extractMentionedEventRefs(event: NostrEvent): ReferencedEventRef[] {
   return [...refsById.values()];
 }
 
-async function connectRelays(urls: RelayUrl[]): Promise<ConnectedRelay[]> {
-  const relays = await Promise.all(
-    urls.map(async (url) => {
-      try {
-        return await Relay.connect(url);
-      } catch {
-        return null;
-      }
-    }),
-  );
-  return relays.filter((relay): relay is ConnectedRelay => Boolean(relay));
-}
-
-function closeRelays(relays: ConnectedRelay[]): void {
-  relays.forEach((relay) => {
-    try {
-      relay.close();
-    } catch {
-      // Relay already closed.
-    }
-  });
-}
-
 function chunkIds(ids: string[], batchSize: number): string[][] {
   const chunks: string[][] = [];
   for (let index = 0; index < ids.length; index += batchSize) {
@@ -518,18 +488,33 @@ function prioritizeRootIds(
 }
 
 export function scheduleFeedSnapshotRefresh(
-  refresh: () => Promise<unknown>,
+  refresh: (signal: AbortSignal) => Promise<unknown>,
   refreshSeconds: number,
   onError: (error: unknown) => void,
 ): { close(): void } | null {
   if (!Number.isFinite(refreshSeconds) || refreshSeconds <= 0) return null;
 
+  const activeControllers = new Set<AbortController>();
   const timer = setInterval(() => {
-    void refresh().catch(onError);
+    const controller = new AbortController();
+    activeControllers.add(controller);
+    void refresh(controller.signal)
+      .catch((error) => {
+        if (!controller.signal.aborted) onError(error);
+      })
+      .finally(() => {
+        activeControllers.delete(controller);
+      });
   }, refreshSeconds * 1_000);
   timer.unref();
 
-  return { close: () => clearInterval(timer) };
+  return {
+    close: () => {
+      clearInterval(timer);
+      activeControllers.forEach((controller) => controller.abort());
+      activeControllers.clear();
+    },
+  };
 }
 
 export function createFeedSnapshotService({
@@ -544,74 +529,18 @@ export function createFeedSnapshotService({
   enrichmentRelays,
   threadRelays,
   moderation,
+  persistSnapshot,
 }: FeedSnapshotServiceOptions) {
   let snapshot: FeedBootstrapSnapshot | null = null;
   let lastRefreshError: string | null = null;
-  let refreshPromise: Promise<FeedBootstrapSnapshot> | null = null;
+  let activeRefresh: {
+    controller: AbortController;
+    owners: Set<symbol>;
+    promise: Promise<FeedBootstrapSnapshot>;
+    settled: boolean;
+    committed: boolean;
+  } | null = null;
   const rootResolutionDepth = Math.max(1, replyFetchDepth + 1);
-
-  async function subscribeOnce(relays: ConnectedRelay[], filter: Filter, relayUrls?: RelayUrl[]): Promise<RelayBatch> {
-    const targetRelays = relayUrls
-      ? relays.filter((relay) =>
-          relayUrls.some((url) => normalizeRelayUrl(url) === normalizeRelayUrl(relay.url)),
-        )
-      : relays;
-
-    if (targetRelays.length === 0) {
-      return { events: [], relayHintsByEventId: new Map() };
-    }
-
-    const events: NostrEvent[] = [];
-    const seenIds = new Set<string>();
-    const relayHintsByEventId: RelayHintsByEventId = new Map();
-
-    await new Promise<void>((resolve) => {
-      const subscriptions: SubscriptionLike[] = [];
-      let eoseCount = 0;
-      let settled = false;
-
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        subscriptions.forEach((sub) => {
-          try {
-            sub.close();
-          } catch {
-            // Subscription already closed.
-          }
-        });
-        resolve();
-      };
-
-      const timer = setTimeout(finish, timeoutMs);
-
-      for (const relay of targetRelays) {
-        try {
-          const sub = relay.subscribe([filter], {
-            onevent(event: unknown) {
-              if (!isNostrEvent(event)) return;
-              addRelayHint(relayHintsByEventId, event.id, relay.url);
-              if (!seenIds.has(event.id)) {
-                seenIds.add(event.id);
-                events.push(event);
-              }
-            },
-            oneose() {
-              eoseCount += 1;
-              if (eoseCount >= targetRelays.length) finish();
-            },
-          });
-          subscriptions.push(sub);
-        } catch {
-          eoseCount += 1;
-          if (eoseCount >= targetRelays.length) finish();
-        }
-      }
-    });
-
-    return { events, relayHintsByEventId };
-  }
 
   async function querySessionOnce(
     session: FiniteRelaySession,
@@ -638,7 +567,7 @@ export function createFeedSnapshotService({
     return { events, relayHintsByEventId };
   }
 
-  async function fetchReplyClosure({ session, relays, parentIds, relayUrls, knownEventIds = new Set() }: FetchReplyClosureOptions): Promise<RelayBatch> {
+  async function fetchReplyClosure({ session, parentIds, relayUrls, knownEventIds = new Set() }: FetchReplyClosureOptions): Promise<RelayBatch> {
     const replyEvents: NostrEvent[] = [];
     const seenReplyIds = new Set<string>();
     const replyRelayHintsByEventId: RelayHintsByEventId = new Map();
@@ -652,9 +581,7 @@ export function createFeedSnapshotService({
         const replyFilter = buildReplyFilter(parentChunk, since, replyLimit);
         if (!replyFilter) continue;
 
-        const replyBatch = session
-          ? await querySessionOnce(session, replyFilter, relayUrls)
-          : await subscribeOnce(relays, replyFilter, relayUrls);
+        const replyBatch = await querySessionOnce(session, replyFilter, relayUrls);
 
         replyBatch.relayHintsByEventId.forEach((relaysForEvent, eventId) => {
           relaysForEvent.forEach((relay) => addRelayHint(replyRelayHintsByEventId, eventId, relay));
@@ -771,10 +698,14 @@ export function createFeedSnapshotService({
     };
   }
 
-  async function fetchGlobalFeedEvents(): Promise<RelayBatch> {
+  async function fetchGlobalFeedEvents(signal?: AbortSignal): Promise<RelayBatch> {
     const relayUrls = uniqueRelays([...threadRelays, ...powRelays]);
     return withFiniteRelaySession(
-      { relayUrls, connectDeadlineMs: timeoutMs },
+      {
+        relayUrls,
+        connectDeadlineMs: timeoutMs,
+        ...(signal ? { signal } : {}),
+      },
       async (session) => {
         const since = sinceFromAgeHours(ageHours);
         const activityBatch = await querySessionOnce(
@@ -937,7 +868,11 @@ export function createFeedSnapshotService({
     );
   }
 
-  async function fetchReferencedEvents(refs: ReferencedEventRef[], knownEventIds: Set<string>): Promise<RelayBatch> {
+  async function fetchReferencedEvents(
+    refs: ReferencedEventRef[],
+    knownEventIds: Set<string>,
+    signal?: AbortSignal,
+  ): Promise<RelayBatch> {
     const missingRefs = refs.filter((ref) => !knownEventIds.has(ref.id));
     if (missingRefs.length === 0) {
       return { events: [], relayHintsByEventId: new Map() };
@@ -950,7 +885,11 @@ export function createFeedSnapshotService({
     const relayUrls = uniqueRelays([...configuredRelayUrls, ...hintedRelayUrls]);
 
     return withFiniteRelaySession(
-      { relayUrls: configuredRelayUrls, connectDeadlineMs: timeoutMs },
+      {
+        relayUrls: configuredRelayUrls,
+        connectDeadlineMs: timeoutMs,
+        ...(signal ? { signal } : {}),
+      },
       async (session) => {
         const hintedConnections = session.ensureRelays(hintedRelayUrls, timeoutMs);
         const configuredBatch = await querySessionOnce(
@@ -1022,10 +961,17 @@ export function createFeedSnapshotService({
     );
   }
 
-  async function fetchProfileMetadata(pubkeys: Pubkey[]): Promise<Record<Pubkey, ProfileSummary>> {
+  async function fetchProfileMetadata(
+    pubkeys: Pubkey[],
+    signal?: AbortSignal,
+  ): Promise<Record<Pubkey, ProfileSummary>> {
     if (pubkeys.length === 0) return {};
     return withFiniteRelaySession(
-      { relayUrls: threadRelays, connectDeadlineMs: timeoutMs },
+      {
+        relayUrls: threadRelays,
+        connectDeadlineMs: timeoutMs,
+        ...(signal ? { signal } : {}),
+      },
       async (session) => {
         const { events } = await querySessionOnce(
           session,
@@ -1069,18 +1015,25 @@ export function createFeedSnapshotService({
     }
   }
 
-  async function persist(nextSnapshot: FeedBootstrapSnapshot): Promise<void> {
+  async function persistToDisk(nextSnapshot: FeedBootstrapSnapshot | null): Promise<void> {
     await mkdir(path.dirname(cacheFile), { recursive: true });
+    if (!nextSnapshot) {
+      await rm(cacheFile, { force: true });
+      return;
+    }
     await writeFile(cacheFile, JSON.stringify(nextSnapshot), "utf8");
   }
 
-  async function fetch(): Promise<FeedBootstrapSnapshot> {
+  const persist = persistSnapshot ?? persistToDisk;
+
+  async function fetch(signal?: AbortSignal): Promise<FeedBootstrapSnapshot> {
     const previousSnapshot = snapshot;
     const cachedBatch = snapshotBatchForRefresh(
       previousSnapshot,
       sinceFromAgeHours(ageHours),
     );
-    const freshBatch = await fetchGlobalFeedEvents();
+    const freshBatch = await fetchGlobalFeedEvents(signal);
+    signal?.throwIfAborted();
     const feedBatch = {
       events: mergeEvents(cachedBatch.events, freshBatch.events),
       relayHintsByEventId: mergeRelayHints(
@@ -1102,7 +1055,9 @@ export function createFeedSnapshotService({
     const referencedBatch = await fetchReferencedEvents(
       snapshotReferenceRefs(bootstrapProcessedEvents),
       knownEventIds,
+      signal,
     );
+    signal?.throwIfAborted();
     const visibleReferencedEvents =
       manifest.updatedAt === 0
         ? referencedBatch.events
@@ -1117,7 +1072,8 @@ export function createFeedSnapshotService({
     );
     const eventIds = new Set(events.map((event) => normalizeEventId(event.id)));
     const pubkeys = [...new Set(events.map((event) => event.pubkey))];
-    const freshProfiles = await fetchProfileMetadata(pubkeys);
+    const freshProfiles = await fetchProfileMetadata(pubkeys, signal);
+    signal?.throwIfAborted();
     const profiles = {
       ...pickProfilesForPubkeys(previousSnapshot?.profiles, pubkeys),
       ...freshProfiles,
@@ -1140,25 +1096,104 @@ export function createFeedSnapshotService({
     };
   }
 
-  async function refresh(): Promise<FeedBootstrapSnapshot> {
-    if (refreshPromise) return refreshPromise;
+  function refresh({ signal }: { signal?: AbortSignal } = {}): Promise<FeedBootstrapSnapshot> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
 
-    refreshPromise = fetch()
-      .then(async (nextSnapshot) => {
-        snapshot = nextSnapshot;
-        lastRefreshError = null;
-        await persist(nextSnapshot);
-        return nextSnapshot;
-      })
-      .catch((error) => {
-        lastRefreshError = error instanceof Error ? error.message : "refresh failed";
-        throw error;
-      })
-      .finally(() => {
-        refreshPromise = null;
-      });
+    if (!activeRefresh) {
+      const controller = new AbortController();
+      let operation!: {
+        controller: AbortController;
+        owners: Set<symbol>;
+        promise: Promise<FeedBootstrapSnapshot>;
+        settled: boolean;
+        committed: boolean;
+      };
+      const promise = fetch(controller.signal)
+        .then(async (nextSnapshot) => {
+          controller.signal.throwIfAborted();
+          const previousSnapshot = snapshot;
+          const previousRefreshError = lastRefreshError;
+          try {
+            await persist(nextSnapshot);
+            controller.signal.throwIfAborted();
+            operation.committed = true;
+            snapshot = nextSnapshot;
+            lastRefreshError = null;
+            return nextSnapshot;
+          } catch (error) {
+            if (controller.signal.aborted) {
+              await persist(previousSnapshot);
+              snapshot = previousSnapshot;
+              lastRefreshError = previousRefreshError;
+            }
+            throw error;
+          }
+        })
+        .catch((error) => {
+          if (!controller.signal.aborted) {
+            lastRefreshError = error instanceof Error ? error.message : "refresh failed";
+          }
+          throw error;
+        })
+        .finally(() => {
+          operation.settled = true;
+          if (activeRefresh === operation) activeRefresh = null;
+        });
+      operation = {
+        controller,
+        owners: new Set<symbol>(),
+        promise,
+        settled: false,
+        committed: false,
+      };
+      activeRefresh = operation;
+    }
 
-    return refreshPromise;
+    const operation = activeRefresh;
+    const owner = Symbol("feed-refresh-owner");
+    operation.owners.add(owner);
+
+    return new Promise<FeedBootstrapSnapshot>((resolve, reject) => {
+      let settled = false;
+      const release = () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        operation.owners.delete(owner);
+      };
+      const abort = () => {
+        if (settled) return;
+        if (operation.committed) return;
+        release();
+        const cancelsOperation = !operation.settled && operation.owners.size === 0;
+        if (cancelsOperation) {
+          operation.controller.abort(signal?.reason);
+          void operation.promise.then(
+            () => reject(signal?.reason ?? new DOMException("Aborted", "AbortError")),
+            () => reject(signal?.reason ?? new DOMException("Aborted", "AbortError")),
+          );
+          return;
+        }
+        reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      operation.promise.then(
+        (nextSnapshot) => {
+          if (settled) return;
+          release();
+          resolve(nextSnapshot);
+        },
+        (error) => {
+          if (settled) return;
+          release();
+          reject(error);
+        },
+      );
+    });
+  }
+
+  function cancelRefresh(reason?: unknown): void {
+    activeRefresh?.controller.abort(reason);
   }
 
   function status(): FeedSnapshotStatus {
@@ -1168,7 +1203,7 @@ export function createFeedSnapshotService({
       eventCount: snapshot ? Object.keys(snapshot.eventsById || {}).length : 0,
       relayHintCount: snapshot ? Object.keys(snapshot.relayHintsByEventId || {}).length : 0,
       profileCount: snapshot ? Object.keys(snapshot.profiles).length : 0,
-      refreshing: Boolean(refreshPromise),
+      refreshing: Boolean(activeRefresh),
       lastRefreshError,
       refreshSeconds,
       ageHours,
@@ -1185,6 +1220,7 @@ export function createFeedSnapshotService({
     lastRefreshError: () => lastRefreshError,
     loadFromDisk,
     refresh,
+    cancelRefresh,
     status,
   };
 }

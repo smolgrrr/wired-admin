@@ -741,3 +741,179 @@ test("feed snapshot queries hints only for references missing from configured co
     await rm(temporaryDirectory, { force: true, recursive: true });
   }
 });
+
+test("feed snapshot cancellation cleans relay work and retains the prior snapshot", async () => {
+  const temporaryDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "wired-feed-cancellation-"),
+  );
+  const harnesses: RelayTranscriptHarness[] = [];
+  let persistedSnapshot: ReturnType<
+    ReturnType<typeof createFeedSnapshotService>["current"]
+  > = null;
+  let blockNextPersistence = false;
+  let resolvePersistenceStarted: (() => void) | null = null;
+  let releasePersistence!: () => void;
+
+  try {
+    const session = new RelayTranscriptSession();
+    let stalled = false;
+    const pendingRequests: RelayRequestController[] = [];
+    const respond = (request: RelayRequestController) => {
+      const [filter] = request.filters;
+      if (filter?.kinds?.includes(1) && !filter.ids && !filter["#e"]) {
+        request.sendEvent(rootEvent);
+      }
+      request.sendEose();
+    };
+    const options = {
+      session,
+      onRequest(request: RelayRequestController) {
+        if (stalled) {
+          pendingRequests.push(request);
+          return;
+        }
+        respond(request);
+      },
+    };
+    harnesses.push(
+      await RelayTranscriptHarness.listen(options),
+      await RelayTranscriptHarness.listen(options),
+    );
+    const relayUrls = harnesses.map((harness) => harness.url);
+    const service = createFeedSnapshotService({
+      cacheFile: path.join(temporaryDirectory, "feed.json"),
+      refreshSeconds: 300,
+      ageHours: 24,
+      timeoutMs: 1_000,
+      replyLimit: 100,
+      replyFetchDepth: 2,
+      minPow: 0,
+      powRelays: relayUrls,
+      enrichmentRelays: relayUrls,
+      threadRelays: relayUrls,
+      moderation: createModerationService(
+        path.join(temporaryDirectory, "moderation.json"),
+      ),
+      async persistSnapshot(nextSnapshot) {
+        if (blockNextPersistence) {
+          blockNextPersistence = false;
+          resolvePersistenceStarted?.();
+          await new Promise<void>((resolve) => {
+            releasePersistence = resolve;
+          });
+        }
+        persistedSnapshot = nextSnapshot;
+      },
+    });
+    const previousSnapshot = await service.refresh();
+    const previousClosedConnections = session.entries.filter(
+      (entry) => entry.type === "connection-closed",
+    ).length;
+
+    stalled = true;
+    const controller = new AbortController();
+    const cancelledRefresh = service.refresh({ signal: controller.signal });
+    await session.waitFor(
+      (entries) =>
+        entries.filter((entry) => entry.type === "connection-opened").length >=
+          previousClosedConnections + 2 &&
+        entries.filter((entry) => entry.type === "request").length >= 7,
+    );
+    controller.abort();
+    await assert.rejects(
+      cancelledRefresh,
+      (error: unknown) =>
+        error instanceof DOMException && error.name === "AbortError",
+    );
+    assert.equal(
+      service.status().refreshing,
+      false,
+      "cancelled refresh settled before local relay ownership was cleaned",
+    );
+    await session.waitFor(
+      (entries) =>
+        entries.filter((entry) => entry.type === "connection-closed").length >=
+        previousClosedConnections + 2,
+    );
+
+    assert.strictEqual(service.current(), previousSnapshot);
+    assert.equal(service.lastRefreshError(), null);
+
+    stalled = false;
+    pendingRequests.length = 0;
+    const recoveredSnapshot = await service.refresh();
+    assert.deepEqual(
+      Object.keys(recoveredSnapshot.eventsById),
+      Object.keys(previousSnapshot.eventsById),
+    );
+
+    blockNextPersistence = true;
+    const persistenceStarted = new Promise<void>((resolve) => {
+      resolvePersistenceStarted = resolve;
+    });
+    const persistenceController = new AbortController();
+    const persistenceCancellation = service.refresh({
+      signal: persistenceController.signal,
+    });
+    await persistenceStarted;
+    persistenceController.abort();
+    releasePersistence();
+    await assert.rejects(persistenceCancellation, { name: "AbortError" });
+    assert.strictEqual(service.current(), recoveredSnapshot);
+    assert.strictEqual(persistedSnapshot, recoveredSnapshot);
+
+    stalled = true;
+    const joiningController = new AbortController();
+    const cancelledOwner = service.refresh({
+      signal: joiningController.signal,
+    });
+    const survivingOwner = service.refresh();
+    await session.waitFor(() => pendingRequests.length >= 2);
+    assert.ok(pendingRequests.length >= 2);
+    joiningController.abort();
+    await assert.rejects(cancelledOwner, { name: "AbortError" });
+    stalled = false;
+    pendingRequests.splice(0).forEach(respond);
+    const coalescedSnapshot = await survivingOwner;
+    assert.deepEqual(
+      Object.keys(coalescedSnapshot.eventsById),
+      Object.keys(previousSnapshot.eventsById),
+    );
+  } finally {
+    await Promise.all(harnesses.map((harness) => harness.close()));
+    await rm(temporaryDirectory, { force: true, recursive: true });
+  }
+});
+
+test("closing the feed refresh scheduler aborts its active ownership", async () => {
+  const activeSignals: AbortSignal[] = [];
+  let resolveStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    resolveStarted = resolve;
+  });
+  let onErrorCalls = 0;
+  const schedule = scheduleFeedSnapshotRefresh(
+    (signal) => {
+      activeSignals.push(signal);
+      if (activeSignals.length >= 2) resolveStarted();
+      return new Promise((_, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+      });
+    },
+    0.001,
+    () => {
+      onErrorCalls += 1;
+    },
+  );
+
+  assert.ok(schedule);
+  await started;
+  schedule.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.ok(activeSignals.length >= 2);
+  assert.ok(activeSignals.every((signal) => signal.aborted));
+  assert.equal(onErrorCalls, 0);
+});
