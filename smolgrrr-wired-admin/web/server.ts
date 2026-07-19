@@ -28,6 +28,7 @@ import {
   createFeedSnapshotService,
   scheduleFeedSnapshotRefresh,
 } from "./src/feed-snapshot-service.js";
+import { installGracefulShutdown } from "./src/server-shutdown.js";
 import { registerHttpRoutes } from "./src/http-routes.js";
 import { createRelayGateway } from "./src/relay-gateway.js";
 import { createHttpAccess } from "./src/http-access.js";
@@ -1598,13 +1599,22 @@ void feedSnapshot.refresh().catch(() => {
 });
 
 const feedSnapshotRefreshSchedule = scheduleFeedSnapshotRefresh(
-  () => feedSnapshot.refresh(),
+  (signal) => feedSnapshot.refresh({ signal }),
   refreshSeconds,
   () => {
     console.error(feedSnapshot.lastRefreshError() || "scheduled refresh failed");
   },
 );
-server.on("close", () => feedSnapshotRefreshSchedule?.close());
+const stopFeedSnapshotRefresh = () => {
+  feedSnapshotRefreshSchedule?.close();
+  feedSnapshot.cancelRefresh();
+};
+installGracefulShutdown({
+  server,
+  webSockets: wss,
+  onShutdown: stopFeedSnapshotRefresh,
+});
+server.on("close", stopFeedSnapshotRefresh);
 
 if (confessXConfig.enabled) {
   void processPendingConfessXMirrors().catch((error) => {

@@ -95,6 +95,15 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
     wiredAccountStoreFile,
   } = deps;
 
+  const refreshFeedForRequest = (req: Request) => {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    req.once("aborted", abort);
+    return feedSnapshot
+      .refresh({ signal: controller.signal })
+      .finally(() => req.off("aborted", abort));
+  };
+
   app.get("/api/status", async (_req: Request, res: Response) => {
     const actions = await moderation.getActions();
     const manifest = moderation.manifestFromActions(actions);
@@ -131,7 +140,7 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
     });
   });
 
-  app.get("/api/feed/bootstrap", async (_req: Request, res: Response) => {
+  app.get("/api/feed/bootstrap", async (req: Request, res: Response) => {
     res.setHeader(
       "Cache-Control",
       "public, max-age=60, s-maxage=120, stale-while-revalidate=600",
@@ -143,7 +152,7 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
     }
 
     try {
-      res.json(await feedSnapshot.refresh());
+      res.json(await refreshFeedForRequest(req));
     } catch {
       res.status(503).json({
         error: "bootstrap unavailable",
@@ -159,7 +168,7 @@ export function registerHttpRoutes(app: Application, deps: RegisterHttpRoutesDep
     }
 
     try {
-      const nextSnapshot = await feedSnapshot.refresh();
+      const nextSnapshot = await refreshFeedForRequest(req);
       res.json({
         ok: true,
         fetchedAt: nextSnapshot.fetchedAt,
