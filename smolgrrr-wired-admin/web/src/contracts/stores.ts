@@ -68,6 +68,7 @@ export type ConfessXMirror = {
   mediaUploadedAt?: number;
   tweetId?: string;
   replyTweetId?: string;
+  threadCardUri?: string;
   postedAt?: number | null;
   repliedAt?: number;
 };

@@ -158,11 +158,19 @@ const confessXMaxLength = Math.max(
   1,
   Math.min(280, Number(process.env.CONFESS_X_MAX_LENGTH || 260)),
 );
+function normalizeConfessXCardUri(value: unknown): string {
+  const cardUri = String(value || "").trim();
+  return /^card:\/\/\d+$/i.test(cardUri) ? cardUri : "";
+}
+
 const confessXThreadBaseUrl = String(
   process.env.CONFESS_X_THREAD_BASE_URL || "https://wiredsignal.online/thread",
 )
   .trim()
   .replace(/\/+$/, "");
+const confessXThreadCardUri = normalizeConfessXCardUri(
+  process.env.CONFESS_X_THREAD_CARD_URI,
+);
 const confessXThreadRelays = readEnvList("CONFESS_X_THREAD_RELAYS", [
   "wss://relay.wiredsignal.online",
 ]);
@@ -210,6 +218,7 @@ const confessXConfig = {
   postPrefix: String(process.env.CONFESS_X_POST_PREFIX || "").trim(),
   postSuffix: String(process.env.CONFESS_X_POST_SUFFIX || "").trim(),
   safetyMode: String(process.env.CONFESS_X_SAFETY_MODE || "strict").trim().toLowerCase(),
+  threadCardUri: confessXThreadCardUri,
 };
 const confessXClient = createXClient(confessXConfig, confessXPostTimeoutMs);
 const moderation = createModerationService(moderationStoreFile);
@@ -835,6 +844,7 @@ function initialConfessXMirror(event: NostrEvent, store: ConfessStore): ConfessX
     postMode: "image" as const,
     accountHandle: confessXConfig.accountHandle || null,
     threadUrl: confessXThreadUrl(event.id, event.pubkey),
+    ...(confessXConfig.threadCardUri ? { threadCardUri: confessXConfig.threadCardUri } : {}),
     updatedAt: now,
   };
 
@@ -925,7 +935,7 @@ function confessXThreadUrl(eventId: string, pubkey = ""): string {
 }
 
 function buildConfessXThreadReplyText(eventId: string, pubkey = ""): string {
-  return `thread: ${confessXThreadUrl(eventId, pubkey)}`;
+  return `read the full thread on Wired:\n${confessXThreadUrl(eventId, pubkey)}`;
 }
 
 type XApiPayload = {
@@ -971,6 +981,7 @@ async function postConfessXText(
       attempts: Number(existingMirror?.attempts || 0) + 1,
       nextAttemptAt: null,
       threadUrl: eventId ? confessXThreadUrl(eventId, existingMirror?.pubkey) : existingMirror?.threadUrl,
+      ...(confessXConfig.threadCardUri ? { threadCardUri: confessXConfig.threadCardUri } : {}),
       postedAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -1041,6 +1052,7 @@ async function postConfessXText(
   const replyResponse = await confessXClient.postTweet({
     text: threadReplyText,
     inReplyToTweetId: tweetId,
+    cardUri: confessXConfig.threadCardUri || null,
   });
   const replyPayload = (await readHttpJsonResponse(replyResponse)) as XApiPayload | null;
   if (replyResponse.ok && replyPayload?.data?.id) {
@@ -1055,6 +1067,7 @@ async function postConfessXText(
       tweetId,
       replyTweetId: replyPayload.data.id,
       threadUrl: confessXThreadUrl(eventId, existingMirror?.pubkey),
+      ...(confessXConfig.threadCardUri ? { threadCardUri: confessXConfig.threadCardUri } : {}),
       nextAttemptAt: null,
       postedAt,
       repliedAt: Date.now(),
@@ -1071,6 +1084,7 @@ async function postConfessXText(
     postMode: "image",
     tweetId,
     threadUrl: confessXThreadUrl(eventId, existingMirror?.pubkey),
+    ...(confessXConfig.threadCardUri ? { threadCardUri: confessXConfig.threadCardUri } : {}),
     postedAt,
   };
   if (mediaId) failedReplyPatch.mediaId = mediaId;
@@ -1170,6 +1184,7 @@ function confessXStatusFromStore(store: ConfessStore): ConfessXStatus & {
     authMode: confessXAuthMode(),
     accountHandle: confessXConfig.accountHandle || null,
     postMode: "image",
+    threadCardUri: confessXConfig.threadCardUri || null,
     safetyMode: confessXConfig.safetyMode,
     maxLength: confessXMaxLength,
     image: {
@@ -1194,6 +1209,7 @@ function publicConfessXMirror(mirror: ConfessXMirror | undefined): PublicConfess
   if (mirror.tweetId) result.tweetId = mirror.tweetId;
   if (mirror.replyTweetId) result.replyTweetId = mirror.replyTweetId;
   if (mirror.threadUrl) result.threadUrl = mirror.threadUrl;
+  if (mirror.threadCardUri) result.threadCardUri = mirror.threadCardUri;
   if (mirror.postMode) result.postMode = mirror.postMode;
   if (mirror.imageHash) result.imageHash = mirror.imageHash;
   if (typeof mirror.imageBytes === "number") result.imageBytes = mirror.imageBytes;

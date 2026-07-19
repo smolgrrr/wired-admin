@@ -142,6 +142,7 @@ export type ConfessXStatus = {
   authMode: string;
   accountHandle: string | null;
   postMode: "image";
+  threadCardUri?: string | null;
   image: {
     width: number;
     height: number;
@@ -156,6 +157,7 @@ export type PublicConfessXMirror = {
   tweetId?: string;
   replyTweetId?: string;
   threadUrl?: string;
+  threadCardUri?: string;
   postMode?: ConfessXMirror["postMode"];
   imageHash?: string;
   imageBytes?: number;

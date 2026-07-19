@@ -13,10 +13,12 @@ export type PostTweetInput = {
   text?: string;
   inReplyToTweetId?: string | null;
   mediaIds?: string[];
+  cardUri?: string | null;
 };
 
 type TweetRequestBody = {
   text?: string;
+  card_uri?: string;
   reply?: {
     in_reply_to_tweet_id: string;
   };
@@ -99,11 +101,14 @@ export function createXClient(config: XClientConfig, timeoutMs: number) {
     text = "",
     inReplyToTweetId = null,
     mediaIds = [],
+    cardUri = null,
   }: PostTweetInput = {}): Promise<Response> {
     const url = "https://api.x.com/2/tweets";
     const body: TweetRequestBody = {};
     const trimmedText = String(text || "").trim();
+    const trimmedCardUri = String(cardUri || "").trim();
     if (trimmedText) body.text = trimmedText;
+    if (trimmedCardUri) body.card_uri = trimmedCardUri;
     if (inReplyToTweetId) {
       body.reply = { in_reply_to_tweet_id: inReplyToTweetId };
     }

@@ -136,6 +136,8 @@ Runtime environment:
 - `CONFESS_X_ACCOUNT_HANDLE`: optional operator label for status output.
 - `CONFESS_X_THREAD_BASE_URL`: base URL for automatic X replies linking to
   the Wired thread, defaults to `https://wiredsignal.online/thread`.
+- `CONFESS_X_THREAD_CARD_URI`: optional X card URI, such as `card://123`,
+  attached to the thread-link reply when the X account has a configured card.
 
 Before posting, the backend applies conservative X safety gates: no links/media,
 no X mentions, no hashtags/cashtags, no obvious private information, and strict
@@ -143,6 +145,8 @@ blocking for high-risk harassment, threats, self-harm encouragement, scams, and
 sexual-minor patterns. Blocked X mirrors are recorded on the Confess ledger but
 the Nostr event remains published.
 
-After the main X post succeeds, the mirror posts a reply to that X post with the
-Wired thread URL. If the reply fails after the original X post succeeds, retries
-reuse the stored original X post ID and only retry the reply.
+After the main X post succeeds, the mirror posts a reply to that X post inviting
+readers to open the full Wired thread. If `CONFESS_X_THREAD_CARD_URI` is set,
+that reply also requests the configured X card. If the reply fails after the
+original X post succeeds, retries reuse the stored original X post ID and only
+retry the reply.
