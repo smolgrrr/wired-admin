@@ -527,3 +527,99 @@ test("feed snapshot retains complete output when one relay never sends EOSE", as
     await rm(temporaryDirectory, { force: true, recursive: true });
   }
 });
+
+test("feed snapshot reuses activity connections while resolving a missing root", async () => {
+  const temporaryDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "wired-feed-root-session-"),
+  );
+  const harnesses: RelayTranscriptHarness[] = [];
+
+  try {
+    const session = new RelayTranscriptSession();
+    const rootKey = new Uint8Array(32).fill(81);
+    const activityKey = new Uint8Array(32).fill(82);
+    const missingRoot = finalizeEvent(
+      {
+        created_at: 2_000_000_000,
+        kind: 1,
+        tags: [],
+        content: "root resolved after activity",
+      },
+      rootKey,
+    );
+    const activity = finalizeEvent(
+      {
+        created_at: 2_000_000_001,
+        kind: 1,
+        tags: [["e", missingRoot.id, "", "reply"]],
+        content: "qualifying activity",
+      },
+      activityKey,
+    );
+    const options = {
+      session,
+      onRequest(request: RelayRequestController) {
+        const [filter] = request.filters;
+        if (filter?.ids?.includes(missingRoot.id)) {
+          request.sendEvent(missingRoot);
+        } else if (filter?.kinds?.includes(1) && !filter.ids && !filter["#e"]) {
+          request.sendEvent(activity);
+        } else if (filter?.["#e"]?.includes(missingRoot.id)) {
+          request.sendEvent(activity);
+        }
+        request.sendEose();
+      },
+    };
+    harnesses.push(
+      await RelayTranscriptHarness.listen(options),
+      await RelayTranscriptHarness.listen(options),
+    );
+    const relayUrls = harnesses.map((harness) => harness.url);
+    const service = createFeedSnapshotService({
+      cacheFile: path.join(temporaryDirectory, "feed.json"),
+      refreshSeconds: 300,
+      ageHours: 24,
+      timeoutMs: 1_000,
+      replyLimit: 100,
+      replyFetchDepth: 2,
+      minPow: 0,
+      powRelays: relayUrls,
+      enrichmentRelays: relayUrls,
+      threadRelays: relayUrls,
+      moderation: createModerationService(
+        path.join(temporaryDirectory, "moderation.json"),
+      ),
+    });
+
+    const workflow = session.beginWorkflow("admin-feed-missing-root-session");
+    const snapshot = await service.refresh();
+    await session.waitFor(
+      (entries) =>
+        entries.filter((entry) => entry.type === "connection-closed").length >=
+        4,
+    );
+    workflow.complete();
+
+    assert.deepEqual(
+      Object.keys(snapshot.eventsById).sort(),
+      [activity.id, missingRoot.id].sort(),
+    );
+    assert.deepEqual(
+      {
+        openedConnections: session.summary(workflow).openedConnections,
+        closedConnections: session.summary(workflow).closedConnections,
+        requests: session.summary(workflow).requests,
+        relayFanout: session.summary(workflow).relayFanout,
+      },
+      {
+        openedConnections: 4,
+        closedConnections: 4,
+        requests: 8,
+        relayFanout: 2,
+      },
+    );
+  } finally {
+    await Promise.all(harnesses.map((harness) => harness.close()));
+    await rm(temporaryDirectory, { force: true, recursive: true });
+  }
+});
